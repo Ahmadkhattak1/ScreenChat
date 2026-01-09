@@ -12,7 +12,8 @@
     ],
     "host_permissions": [
         "<all_urls>",
-        "https://screenchat-backend-production.up.railway.app/*"
+        "https://screenchat-backend-production.up.railway.app/*",
+        "http://localhost:3000/*"
     ],
     "action": {
         "default_icon": {

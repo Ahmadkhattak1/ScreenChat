@@ -50,9 +50,12 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'capture_tab') {
         // Only capture the visible area of the active tab
+        const format = request.format || 'jpeg';
+        const quality = request.quality || 60; // Default to 60% quality for tokens
+
         chrome.tabs.captureVisibleTab(
             sender.tab.windowId,
-            { format: 'png' },
+            { format: format, quality: quality },
             (dataUrl) => {
                 if (chrome.runtime.lastError) {
                     console.error(chrome.runtime.lastError);
