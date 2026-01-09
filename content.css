@@ -9,17 +9,62 @@
     right: 20px;
 }
 
+:host(.sc-left) {
+    right: auto;
+    left: 20px;
+}
+
 .sc-container {
     width: 350px;
     height: 500px;
+    min-width: 280px;
+    min-height: 300px;
+    max-width: 600px;
+    max-height: 80vh;
     background: #ffffff;
     border-radius: 12px;
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    transition: all 0.3s ease;
+    transition: box-shadow 0.2s, border-color 0.2s;
     border: 1px solid #eee;
+    position: relative;
+}
+
+/* Resize Handle */
+.sc-resize-handle {
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    bottom: 0;
+    right: 0;
+    cursor: nwse-resize;
+    z-index: 10;
+}
+
+.sc-resize-handle::after {
+    content: '';
+    position: absolute;
+    bottom: 4px;
+    right: 4px;
+    width: 8px;
+    height: 8px;
+    border-right: 2px solid #ccc;
+    border-bottom: 2px solid #ccc;
+}
+
+:host(.sc-left) .sc-resize-handle {
+    right: auto;
+    left: 0;
+    cursor: nesw-resize;
+}
+
+:host(.sc-left) .sc-resize-handle::after {
+    right: auto;
+    left: 4px;
+    border-right: none;
+    border-left: 2px solid #ccc;
 }
 
 /* Header */
@@ -312,4 +357,95 @@
 /* Hide task progress in minimized state */
 .sc-container.minimized .sc-task-progress {
     display: none;
+}
+
+/* History View */
+.sc-history-view {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: #fff;
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    transform: translateX(100%);
+    transition: transform 0.3s ease;
+}
+
+.sc-history-view.visible {
+    transform: translateX(0);
+}
+
+.sc-history-header {
+    padding: 16px;
+    border-bottom: 1px solid #eee;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.sc-history-header h3 {
+    margin: 0;
+    font-size: 16px;
+    color: #333;
+}
+
+.sc-history-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px;
+}
+
+.sc-history-item {
+    padding: 12px;
+    border: 1px solid #eee;
+    border-radius: 8px;
+    margin-bottom: 8px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: #fafafa;
+}
+
+.sc-history-info {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.sc-history-domain {
+    font-weight: 500;
+    color: #333;
+    font-size: 13px;
+}
+
+.sc-history-date {
+    font-size: 11px;
+    color: #999;
+}
+
+.sc-history-open {
+    background: #6200ea;
+    color: white;
+    border: none;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.sc-history-open:hover {
+    background: #5200c6;
+}
+
+.sc-loading,
+.sc-empty,
+.sc-error {
+    text-align: center;
+    padding: 20px;
+    color: #666;
+    font-size: 13px;
 }

@@ -46,6 +46,36 @@
     let tempUserData = { email: '', password: '' };
     let userId = 'user_' + Math.floor(Math.random() * 1000000);
 
+    // --- Message Cleaning Helpers ---
+    function cleanUserMessage(message) {
+        if (!message) return '';
+        // Strip system context from user messages
+        // Format: [Context...] actual message
+        const parts = message.split('\n\n');
+        for (let i = parts.length - 1; i >= 0; i--) {
+            const part = parts[i].trim();
+            if (part && !part.startsWith('[') && part.toLowerCase() !== 'continue') {
+                return part;
+            }
+        }
+        const lastBracket = message.lastIndexOf(']');
+        if (lastBracket !== -1) {
+            return message.substring(lastBracket + 1).trim();
+        }
+        return message.trim();
+    }
+
+    function cleanAiReply(reply) {
+        if (!reply) return '';
+        try {
+            const parsed = JSON.parse(reply);
+            if (parsed.message) return parsed.message;
+        } catch (e) {
+            // Not JSON, use as-is
+        }
+        return reply;
+    }
+
     // Initialize
     function init() {
         // Cleanup existing
@@ -76,15 +106,29 @@
 
         // Restore Session & Conversation History
         chrome.storage.local.get(['screenchat_user', 'conversationHistory', 'messageCount', 'sc_task_active'], (result) => {
+            // Domain Check - Reset if new domain
+            const currentDomain = window.location.hostname;
+            if (result.sessionDomain && result.sessionDomain !== currentDomain) {
+                console.log('New domain detected, starting new session.');
+                startNewSession(false); // don't clear UI yet, init will do it
+            } else if (result.screenchat_user) {
+                // Restore existing session
+                userId = result.screenchat_user.userId;
+                authState = 'AUTHENTICATED';
+                // ... (rest of restore logic)
+            }
+
+            // Save current domain
+            chrome.storage.local.set({ sessionDomain: currentDomain });
+
             if (result.screenchat_user) {
                 userId = result.screenchat_user.userId;
                 authState = 'AUTHENTICATED';
-                console.log('Restored session for:', userId);
             } else {
                 if (result.messageCount) messageCount = result.messageCount;
             }
 
-            if (result.conversationHistory && result.conversationHistory.length > 0) {
+            if (result.conversationHistory && result.conversationHistory.length > 0 && (!result.sessionDomain || result.sessionDomain === currentDomain)) {
                 conversationHistory = result.conversationHistory;
                 // Re-render chat history
                 const messagesArea = shadowRoot.getElementById('sc-messages');
@@ -129,9 +173,19 @@
                              <path d="M6 1v3M10 1v3M14 1v3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
                         </svg>
                     </a>
+                    <button class="sc-btn-icon" id="sc-history-btn" title="History">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </button>
                     <button class="sc-btn-icon" id="sc-minimize" title="Minimize">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                             <path d="M18 12H6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        </svg>
+                    </button>
+                    <button class="sc-btn-icon" id="sc-position-toggle" title="Move to other side">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M7 16l-4-4m0 0l4-4m-4 4h18" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                         </svg>
                     </button>
                     <button class="sc-btn-icon" id="sc-close" title="Close">
@@ -164,6 +218,20 @@
                 </div>
             </div>
 
+            <div class="sc-history-view" id="sc-history-view">
+                <div class="sc-history-header">
+                    <h3>Chat History</h3>
+                    <button class="sc-btn-icon" id="sc-history-close">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M6 18L18 6M6 6l12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        </svg>
+                    </button>
+                </div>
+                <div class="sc-history-list" id="sc-history-list">
+                    <!-- History items will be injected here -->
+                </div>
+            </div>
+
             <div class="sc-input-area">
                 <div class="sc-input-wrapper">
                     <!-- Standard Chat Input -->
@@ -189,11 +257,22 @@
                     </svg>
                 </button>
             </div>
+
+            <div class="sc-resize-handle" id="sc-resize-handle"></div>
         `;
 
         // Load Icon
         container.style.setProperty('--icon-url', `url(${chrome.runtime.getURL('icons/icon48.png')})`);
         shadowRoot.appendChild(container);
+
+        // Restore saved size and position
+        chrome.storage.local.get(['sc_ui_width', 'sc_ui_height', 'sc_ui_position'], (result) => {
+            if (result.sc_ui_width) container.style.width = result.sc_ui_width + 'px';
+            if (result.sc_ui_height) container.style.height = result.sc_ui_height + 'px';
+            if (result.sc_ui_position === 'left') {
+                document.getElementById('screenchat-host').classList.add('sc-left');
+            }
+        });
 
         // Event Listeners
         setupEventListeners();
@@ -209,6 +288,158 @@
         const messagesArea = shadowRoot.getElementById('sc-messages');
         const googleBtn = shadowRoot.getElementById('sc-google-btn');
         const taskCancelBtn = shadowRoot.getElementById('sc-task-cancel');
+        const historyBtn = shadowRoot.getElementById('sc-history-btn');
+        const historyView = shadowRoot.getElementById('sc-history-view');
+        const closeHistoryBtn = shadowRoot.getElementById('sc-history-close');
+
+        // History Toggle
+        if (historyBtn) {
+            historyBtn.addEventListener('click', () => {
+                historyView.classList.add('visible');
+                loadHistory();
+            });
+        }
+
+        if (closeHistoryBtn) {
+            closeHistoryBtn.addEventListener('click', () => {
+                historyView.classList.remove('visible');
+            });
+        }
+
+        // Load History Logic
+        async function loadHistory() {
+            const listContainer = shadowRoot.getElementById('sc-history-list');
+            listContainer.innerHTML = '<div class="sc-loading">Loading history...</div>';
+
+            try {
+                const response = await fetch(`http://localhost:3000/api/history?userId=${userId}`);
+                const data = await response.json();
+
+                if (data.sessions && data.sessions.length > 0) {
+                    listContainer.innerHTML = '';
+                    data.sessions.forEach(session => {
+                        const item = document.createElement('div');
+                        item.className = 'sc-history-item';
+                        const dateStr = session.updatedAt ? new Date(session.updatedAt).toLocaleString() : 'Unknown date';
+                        item.innerHTML = `
+                            <div class="sc-history-info">
+                                <span class="sc-history-domain">${session.url || 'Unknown URL'}</span>
+                                <span class="sc-history-date">${dateStr}</span>
+                            </div>
+                            <button class="sc-history-open" title="Open Conversation">Open</button>
+                        `;
+
+                        item.querySelector('.sc-history-open').addEventListener('click', () => restoreSession(session.id, session.url));
+                        listContainer.appendChild(item);
+                    });
+                } else {
+                    listContainer.innerHTML = '<div class="sc-empty">No history found.</div>';
+                }
+            } catch (e) {
+                listContainer.innerHTML = '<div class="sc-error">Failed to load history.</div>';
+            }
+        }
+
+        // Restore Session Logic
+        async function restoreSession(sid, url) {
+            const listContainer = shadowRoot.getElementById('sc-history-list');
+            const originalContent = listContainer.innerHTML;
+            listContainer.innerHTML = '<div class="sc-loading">Restoring chat...</div>';
+
+            try {
+                const response = await fetch(`http://localhost:3000/api/history/messages?userId=${userId}&sessionId=${sid}`);
+                const data = await response.json();
+
+                if (data.history) {
+                    // 1. Update Session State
+                    sessionId = sid;
+                    sessionUrl = url || 'restored_session';
+                    conversationHistory = data.history;
+
+                    // 2. Clear & Re-render Messages
+                    messagesArea.innerHTML = '';
+                    conversationHistory.forEach(msg => {
+                        // Messages are already cleaned by backend, but double-check
+                        const content = msg.role === 'user' ? cleanUserMessage(msg.content) : cleanAiReply(msg.content);
+                        if (content && content.toLowerCase() !== 'continue') {
+                            addMessage(content, msg.role === 'user' ? 'user' : 'ai', null, true);
+                        }
+                    });
+
+                    // 3. Close History View
+                    historyView.classList.remove('visible');
+
+                    // 4. Persist
+                    chrome.storage.local.set({
+                        conversationHistory: conversationHistory,
+                        sessionDomain: window.location.hostname // We are effectively hijacking the current domain session
+                    });
+
+                }
+            } catch (e) {
+                console.error("Restore failed", e);
+                listContainer.innerHTML = originalContent;
+                alert("Failed to restore session.");
+            }
+        }
+
+        // Position Toggle
+        const positionToggleBtn = shadowRoot.getElementById('sc-position-toggle');
+        if (positionToggleBtn) {
+            positionToggleBtn.addEventListener('click', () => {
+                const host = document.getElementById('screenchat-host');
+                const isLeft = host.classList.toggle('sc-left');
+                chrome.storage.local.set({ sc_ui_position: isLeft ? 'left' : 'right' });
+            });
+        }
+
+        // Resize Handle
+        const resizeHandle = shadowRoot.getElementById('sc-resize-handle');
+        if (resizeHandle) {
+            let isResizing = false;
+            let startX, startY, startWidth, startHeight;
+
+            resizeHandle.addEventListener('mousedown', (e) => {
+                isResizing = true;
+                startX = e.clientX;
+                startY = e.clientY;
+                startWidth = container.offsetWidth;
+                startHeight = container.offsetHeight;
+                e.preventDefault();
+            });
+
+            document.addEventListener('mousemove', (e) => {
+                if (!isResizing) return;
+                const host = document.getElementById('screenchat-host');
+                const isLeft = host.classList.contains('sc-left');
+
+                let newWidth, newHeight;
+                if (isLeft) {
+                    newWidth = startWidth + (e.clientX - startX);
+                } else {
+                    newWidth = startWidth - (e.clientX - startX);
+                }
+                newHeight = startHeight - (e.clientY - startY);
+
+                // Apply min/max constraints
+                newWidth = Math.max(280, Math.min(600, newWidth));
+                newHeight = Math.max(300, Math.min(window.innerHeight * 0.8, newHeight));
+
+                container.style.width = newWidth + 'px';
+                container.style.height = newHeight + 'px';
+            });
+
+            document.addEventListener('mouseup', () => {
+                if (isResizing) {
+                    isResizing = false;
+                    // Save size
+                    chrome.storage.local.set({
+                        sc_ui_width: container.offsetWidth,
+                        sc_ui_height: container.offsetHeight
+                    });
+                }
+            });
+        }
 
         // Cancel task button
         taskCancelBtn.addEventListener('click', cancelCurrentTask);
