@@ -41,6 +41,12 @@
     let currentAbortController = null;
     let continueTimeoutRef = null;
 
+    // Chat Mode: 'ask' (Q&A) or 'agent' (task execution)
+    let chatMode = 'agent';
+
+    // User Profile (personal info for personalization)
+    let userProfile = null;
+
     // Session State
     let sessionId = 'session_' + Date.now() + '_' + Math.floor(Math.random() * 10000);
     let sessionUrl = window.location.hostname || 'unknown';
@@ -897,33 +903,45 @@
                 </div>
                 <div class="sc-controls">
                     <button class="sc-btn-icon" id="sc-new-chat" title="New Chat">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                             <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
                         </svg>
                     </button>
-                    <a href="https://buymeacoffee.com/AhmadKhattak" target="_blank" class="sc-btn-icon" id="sc-coffee" title="Buy me a coffee">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <a href="https://buymeacoffee.com/AhmadKhattak" target="_blank" class="sc-btn-icon" id="sc-coffee" title="Support">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                              <path d="M18 8h1a4 4 0 0 1 0 8h-1M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                              <path d="M6 1v3M10 1v3M14 1v3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
                         </svg>
                     </a>
-                    <button class="sc-btn-icon" id="sc-history-btn" title="History">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                            <path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                        </svg>
-                    </button>
+                    <div class="sc-settings-wrapper">
+                        <button class="sc-btn-icon" id="sc-settings-btn" title="Settings">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/>
+                                <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                        </button>
+                        <div class="sc-settings-dropdown" id="sc-settings-dropdown">
+                            <button class="sc-settings-item" id="sc-profile-btn">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2M12 11a4 4 0 100-8 4 4 0 000 8z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                                Personalize
+                            </button>
+                            <button class="sc-settings-item" id="sc-history-btn">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                                History
+                            </button>
+                            <button class="sc-settings-item" id="sc-position-toggle">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M7 16l-4-4m0 0l4-4m-4 4h18" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                                <span id="sc-position-label">Move to left</span>
+                            </button>
+                        </div>
+                    </div>
                     <button class="sc-btn-icon" id="sc-minimize" title="Minimize">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                             <path d="M18 12H6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
                         </svg>
                     </button>
-                    <button class="sc-btn-icon" id="sc-position-toggle" title="Move to other side">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                            <path d="M7 16l-4-4m0 0l4-4m-4 4h18" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                        </svg>
-                    </button>
                     <button class="sc-btn-icon" id="sc-close" title="Close">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                             <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
                         </svg>
                     </button>
@@ -946,8 +964,8 @@
 
             <div class="sc-messages" id="sc-messages">
                 <div class="sc-message ai">
-                    <div class="sc-bubble">
-                        Hello! I'm ScreenChat. Type a message below and I'll automatically capture this page for you.
+                <div class="sc-bubble">
+                        Hey! Use <b>Agent</b> to automate tasks or <b>Ask</b> for help with this page.
                     </div>
                 </div>
             </div>
@@ -966,30 +984,68 @@
                 </div>
             </div>
 
-            <div class="sc-input-area">
-                <div class="sc-input-wrapper">
-                    <!-- Standard Chat Input -->
-                    <textarea class="sc-textarea" id="sc-chat-input" placeholder="Type a message..." rows="1"></textarea>
-                    
-                    <!-- Password Input (Hidden by default) -->
-                    <input type="password" class="sc-password-input" id="sc-password-input" placeholder="Enter your password..." style="display: none;">
+            <div class="sc-profile-view" id="sc-profile-view">
+                <div class="sc-profile-header">
+                    <h3>Personalize Experience</h3>
+                    <button class="sc-btn-icon" id="sc-profile-close">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                            <path d="M6 18L18 6M6 6l12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        </svg>
+                    </button>
                 </div>
-                
-                <!-- Google Button (Hidden by default, shown during auth) -->
-                <button class="sc-google-btn" id="sc-google-btn" style="display: none;" title="Sign in with Google">
-                    <svg viewBox="0 0 24 24" width="18" height="18" xmlns="http://www.w3.org/2000/svg">
-                        <path fill="#fff" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-                        <path fill="#fff" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-                        <path fill="#fff" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
-                        <path fill="#fff" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
-                    </svg>
-                </button>
+                <div class="sc-profile-content">
+                    <p class="sc-profile-desc">Optional info to personalize your experience. The AI can use this to auto-fill forms and tailor responses.</p>
+                    <div class="sc-profile-field">
+                        <label for="sc-profile-name">Full Name</label>
+                        <input type="text" id="sc-profile-name" placeholder="John Doe">
+                    </div>
+                    <div class="sc-profile-field">
+                        <label for="sc-profile-nickname">Nickname</label>
+                        <input type="text" id="sc-profile-nickname" placeholder="Johnny">
+                    </div>
+                    <div class="sc-profile-field">
+                        <label for="sc-profile-email">Email</label>
+                        <input type="email" id="sc-profile-email" placeholder="john@example.com">
+                    </div>
+                    <div class="sc-profile-field">
+                        <label for="sc-profile-phone">Phone</label>
+                        <input type="tel" id="sc-profile-phone" placeholder="+1 234 567 8900">
+                    </div>
+                    <div class="sc-profile-field">
+                        <label for="sc-profile-notes">Notes</label>
+                        <textarea id="sc-profile-notes" placeholder="e.g., I work at Google, prefer formal responses..."></textarea>
+                    </div>
+                    <button class="sc-profile-save" id="sc-profile-save">Save Profile</button>
+                </div>
+            </div>
 
-                <button class="sc-send-btn" id="sc-send" title="Send (Enter)">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                    </svg>
-                </button>
+
+            <div class="sc-input-area">
+                <div class="sc-mode-toggle" id="sc-mode-toggle">
+                    <button class="sc-mode-btn active" data-mode="agent" title="Execute tasks on this page">Agent</button>
+                    <button class="sc-mode-btn" data-mode="ask" title="Ask questions about this page">Ask</button>
+                </div>
+                <div class="sc-input-row">
+                    <div class="sc-input-wrapper">
+                        <textarea class="sc-textarea" id="sc-chat-input" placeholder="Tell me what to do..." rows="1"></textarea>
+                        <input type="password" class="sc-password-input" id="sc-password-input" placeholder="Enter your password..." style="display: none;">
+                    </div>
+                    
+                    <button class="sc-google-btn" id="sc-google-btn" style="display: none;" title="Sign in with Google">
+                        <svg viewBox="0 0 24 24" width="18" height="18" xmlns="http://www.w3.org/2000/svg">
+                            <path fill="#fff" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                            <path fill="#fff" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                            <path fill="#fff" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+                            <path fill="#fff" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                        </svg>
+                    </button>
+
+                    <button class="sc-send-btn" id="sc-send" title="Send (Enter)">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </button>
+                </div>
             </div>
 
             <div class="sc-resize-handle" id="sc-resize-handle"></div>
@@ -1029,6 +1085,9 @@
         // History Toggle
         if (historyBtn) {
             historyBtn.addEventListener('click', () => {
+                // Close settings dropdown first
+                const dropdown = shadowRoot.getElementById('sc-settings-dropdown');
+                if (dropdown) dropdown.classList.remove('visible');
                 historyView.classList.add('visible');
                 loadHistory();
             });
@@ -1039,6 +1098,157 @@
                 historyView.classList.remove('visible');
             });
         }
+
+        // Settings Dropdown Toggle
+        const settingsBtn = shadowRoot.getElementById('sc-settings-btn');
+        const settingsDropdown = shadowRoot.getElementById('sc-settings-dropdown');
+        if (settingsBtn && settingsDropdown) {
+            settingsBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                settingsDropdown.classList.toggle('visible');
+            });
+            // Close dropdown when clicking outside
+            document.addEventListener('click', () => {
+                settingsDropdown.classList.remove('visible');
+            });
+            shadowRoot.addEventListener('click', (e) => {
+                if (!e.target.closest('.sc-settings-wrapper')) {
+                    settingsDropdown.classList.remove('visible');
+                }
+            });
+        }
+
+        // Mode Toggle
+        const modeToggle = shadowRoot.getElementById('sc-mode-toggle');
+        if (modeToggle) {
+            const modeButtons = modeToggle.querySelectorAll('.sc-mode-btn');
+            modeButtons.forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const newMode = btn.dataset.mode;
+                    if (newMode !== chatMode) {
+                        chatMode = newMode;
+                        // Update UI
+                        modeButtons.forEach(b => b.classList.remove('active'));
+                        btn.classList.add('active');
+                        // Update placeholder
+                        textarea.placeholder = chatMode === 'agent'
+                            ? 'Tell me what to do...'
+                            : 'Ask me anything about this page...';
+                        // Persist mode preference
+                        chrome.storage.local.set({ sc_chat_mode: chatMode });
+                    }
+                });
+            });
+
+            // Restore saved mode
+            chrome.storage.local.get(['sc_chat_mode'], (result) => {
+                if (result.sc_chat_mode) {
+                    chatMode = result.sc_chat_mode;
+                    modeButtons.forEach(b => {
+                        b.classList.toggle('active', b.dataset.mode === chatMode);
+                    });
+                    textarea.placeholder = chatMode === 'agent'
+                        ? 'Tell me what to do...'
+                        : 'Ask me anything about this page...';
+                }
+            });
+        }
+
+        // ============================================================
+        // Profile Panel Logic
+        // ============================================================
+        const profileBtn = shadowRoot.getElementById('sc-profile-btn');
+        const profileView = shadowRoot.getElementById('sc-profile-view');
+        const profileCloseBtn = shadowRoot.getElementById('sc-profile-close');
+        const profileSaveBtn = shadowRoot.getElementById('sc-profile-save');
+
+        // Profile fields
+        const profileNameInput = shadowRoot.getElementById('sc-profile-name');
+        const profileNicknameInput = shadowRoot.getElementById('sc-profile-nickname');
+        const profileEmailInput = shadowRoot.getElementById('sc-profile-email');
+        const profilePhoneInput = shadowRoot.getElementById('sc-profile-phone');
+        const profileNotesInput = shadowRoot.getElementById('sc-profile-notes');
+
+        // Load profile on init
+        async function loadProfile() {
+            try {
+                const response = await fetch(`http://localhost:3000/api/profile?userId=${userId}`);
+                const data = await response.json();
+                if (data.profile) {
+                    userProfile = data.profile;
+                    // Populate fields
+                    if (profileNameInput) profileNameInput.value = data.profile.fullName || '';
+                    if (profileNicknameInput) profileNicknameInput.value = data.profile.nickname || '';
+                    if (profileEmailInput) profileEmailInput.value = data.profile.email || '';
+                    if (profilePhoneInput) profilePhoneInput.value = data.profile.phone || '';
+                    if (profileNotesInput) profileNotesInput.value = data.profile.notes || '';
+                }
+            } catch (e) {
+                console.error('[Profile] Load error:', e);
+            }
+        }
+
+        // Load profile when we have a userId
+        setTimeout(loadProfile, 500);
+
+        // Open profile panel
+        if (profileBtn) {
+            profileBtn.addEventListener('click', () => {
+                settingsDropdown.classList.remove('visible');
+                profileView.classList.add('visible');
+            });
+        }
+
+        // Close profile panel
+        if (profileCloseBtn) {
+            profileCloseBtn.addEventListener('click', () => {
+                profileView.classList.remove('visible');
+            });
+        }
+
+        // Save profile
+        if (profileSaveBtn) {
+            profileSaveBtn.addEventListener('click', async () => {
+                profileSaveBtn.disabled = true;
+                profileSaveBtn.textContent = 'Saving...';
+
+                const profile = {
+                    fullName: profileNameInput?.value || '',
+                    nickname: profileNicknameInput?.value || '',
+                    email: profileEmailInput?.value || '',
+                    phone: profilePhoneInput?.value || '',
+                    notes: profileNotesInput?.value || ''
+                };
+
+                try {
+                    const response = await fetch('http://localhost:3000/api/profile', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ userId, profile })
+                    });
+                    const data = await response.json();
+                    if (data.success) {
+                        userProfile = profile;
+                        profileSaveBtn.textContent = 'Saved!';
+                        setTimeout(() => {
+                            profileSaveBtn.textContent = 'Save Profile';
+                            profileSaveBtn.disabled = false;
+                            profileView.classList.remove('visible');
+                        }, 1000);
+                    } else {
+                        throw new Error(data.error || 'Failed to save');
+                    }
+                } catch (e) {
+                    console.error('[Profile] Save error:', e);
+                    profileSaveBtn.textContent = 'Error!';
+                    setTimeout(() => {
+                        profileSaveBtn.textContent = 'Save Profile';
+                        profileSaveBtn.disabled = false;
+                    }, 2000);
+                }
+            });
+        }
+
 
         // Load History Logic
         async function loadHistory() {
@@ -1119,13 +1329,31 @@
 
         // Position Toggle
         const positionToggleBtn = shadowRoot.getElementById('sc-position-toggle');
+        const positionLabel = shadowRoot.getElementById('sc-position-label');
+
+        // Helper to update label
+        const updatePositionLabel = () => {
+            const host = document.getElementById('screenchat-host');
+            const isLeft = host?.classList.contains('sc-left');
+            if (positionLabel) {
+                positionLabel.textContent = isLeft ? 'Move to right' : 'Move to left';
+            }
+        };
+
         if (positionToggleBtn) {
             positionToggleBtn.addEventListener('click', () => {
                 const host = document.getElementById('screenchat-host');
                 const isLeft = host.classList.toggle('sc-left');
                 chrome.storage.local.set({ sc_ui_position: isLeft ? 'left' : 'right' });
+                updatePositionLabel();
+                // Close dropdown
+                const dropdown = shadowRoot.getElementById('sc-settings-dropdown');
+                if (dropdown) dropdown.classList.remove('visible');
             });
         }
+
+        // Update label on init based on saved position
+        setTimeout(updatePositionLabel, 100);
 
         // Resize Handle
         const resizeHandle = shadowRoot.getElementById('sc-resize-handle');
@@ -1369,6 +1597,8 @@
                         userId: userId,
                         sessionId: sessionId,
                         sessionUrl: sessionUrl,
+                        mode: chatMode,
+                        profile: userProfile,
                         screenshotType: context.screenshot ? 'viewport' : 'full',
                         elements: context.elements,
                         activeContext: context.activeContext
@@ -1383,7 +1613,18 @@
                 // Remove Loading Bubble
                 removeMessage(loadingId);
 
-                // Parse structured response
+                // ASK MODE: Just show the response, no action execution
+                if (chatMode === 'ask') {
+                    // In Ask mode, response is plain text, not JSON
+                    const responseText = data.reply;
+                    conversationHistory.push({ role: "assistant", content: responseText });
+                    chrome.storage.local.set({ conversationHistory });
+                    addMessage(responseText, 'ai');
+                    setInputState(true);
+                    return;
+                }
+
+                // AGENT MODE: Parse structured response and execute actions
                 const parsed = parseStructuredResponse(data.reply);
 
                 // Update task progress UI from backend taskState
@@ -1401,7 +1642,7 @@
                 chrome.storage.local.set({ conversationHistory });
                 addMessage(parsed.message, 'ai');
 
-                if (parsed.status === 'complete') {
+                if (parsed.status === 'complete' || parsed.status === 'cannot_complete') {
                     chrome.storage.local.remove(['sc_task_active']);
                     updateTaskProgressUI({ inProgress: false });
                     setInputState(true);
@@ -1516,6 +1757,8 @@
                         userId: userId,
                         sessionId: sessionId,
                         sessionUrl: sessionUrl,
+                        mode: chatMode,
+                        profile: userProfile,
                         screenshotType: 'viewport',
                         elements: context.elements,
                         activeContext: context.activeContext
@@ -1545,7 +1788,7 @@
                 chrome.storage.local.set({ conversationHistory });
                 addMessage(parsed.message, 'ai');
 
-                if (parsed.status === 'complete') {
+                if (parsed.status === 'complete' || parsed.status === 'cannot_complete') {
                     chrome.storage.local.remove(['sc_task_active']);
                     updateTaskProgressUI({ inProgress: false });
                     setInputState(true);
@@ -1559,7 +1802,7 @@
                     // AI acknowledged being stuck
                     setInputState(true, "Help me continue...");
                     chrome.storage.local.remove(['sc_task_active']);
-                    TaskPlanner.reset(); // Clean up task state
+                    TaskPlanner.reset();
                     updateTaskProgressUI({ inProgress: false });
                 } else if (parsed.actions && parsed.actions.length > 0) {
                     chrome.storage.local.set({ 'sc_task_active': true });
