@@ -36,6 +36,11 @@
     let contextMode = 'full'; // 'full', 'viewport', 'dom_only'
     let lastPageState = null; // Track page state changes
 
+    // Task cancellation state
+    let taskCancelled = false;
+    let currentAbortController = null;
+    let continueTimeoutRef = null;
+
     // Session State
     let sessionId = 'session_' + Date.now() + '_' + Math.floor(Math.random() * 10000);
     let sessionUrl = window.location.hostname || 'unknown';
@@ -45,6 +50,735 @@
     let authState = 'ANONYMOUS'; // ANONYMOUS, AWAIT_GOOGLE, AUTHENTICATED
     let tempUserData = { email: '', password: '' };
     let userId = 'user_' + Math.floor(Math.random() * 1000000);
+
+    // =============================================================================
+    // CORE SYSTEMS - Element Registry, Overlay Stack, Input Simulator, Task Planner
+    // =============================================================================
+
+    // Interactive element selector
+    const INTERACTIVE_SELECTOR = 'input, textarea, select, button, [role="button"], [role="menuitem"], [role="option"], [role="link"], a[href], [contenteditable="true"], [onclick], [tabindex]:not([tabindex="-1"])';
+
+    // -----------------------------------------------------------------------------
+    // ELEMENT REGISTRY - Stable element identification and tracking
+    // -----------------------------------------------------------------------------
+    const ElementRegistry = {
+        elements: new Map(),
+        lastScan: 0,
+        scanInterval: 500,
+
+        scan(force = false) {
+            if (!force && Date.now() - this.lastScan < this.scanInterval) {
+                return this.elements;
+            }
+
+            this.elements.clear();
+            const activeOverlay = OverlayStack.getTopOverlay();
+            const searchRoot = activeOverlay?.element || document.body;
+
+            const interactiveEls = searchRoot.querySelectorAll(INTERACTIVE_SELECTOR);
+
+            interactiveEls.forEach((el, index) => {
+                if (!this.isVisible(el)) return;
+                if (el.closest('#screenchat-host')) return;
+
+                const id = this.generateStableId(el, index);
+                const meta = {
+                    id,
+                    element: el,
+                    type: this.detectInputType(el),
+                    label: this.getLabel(el),
+                    selector: this.generateRobustSelector(el),
+                    tagName: el.tagName.toLowerCase(),
+                    inputType: el.type || null,
+                    enabled: !el.disabled && !el.getAttribute('aria-disabled'),
+                    required: el.required || el.getAttribute('aria-required') === 'true',
+                    value: this.getCurrentValue(el),
+                    rect: el.getBoundingClientRect(),
+                    inOverlay: !!activeOverlay
+                };
+
+                this.elements.set(id, meta);
+            });
+
+            this.lastScan = Date.now();
+            return this.elements;
+        },
+
+        generateStableId(el, fallbackIndex) {
+            // Priority 1: Test IDs (most stable)
+            for (const attr of ['data-testid', 'data-test', 'data-test-id', 'data-cy', 'data-id']) {
+                const val = el.getAttribute(attr);
+                if (val) return `test:${val}`;
+            }
+
+            // Priority 2: ID (if not dynamic)
+            if (el.id && !/\d{3,}|[-_]\d+$|^:r/.test(el.id)) {
+                return `id:${el.id}`;
+            }
+
+            // Priority 3: Name attribute
+            if (el.name) {
+                return `name:${el.name}`;
+            }
+
+            // Priority 4: Aria-label
+            const ariaLabel = el.getAttribute('aria-label');
+            if (ariaLabel && ariaLabel.length < 50) {
+                return `aria:${ariaLabel.replace(/\s+/g, '_').toLowerCase()}`;
+            }
+
+            // Priority 5: Role + text
+            const role = el.getAttribute('role') || el.tagName.toLowerCase();
+            const text = (el.textContent || '').trim().slice(0, 30).replace(/\s+/g, '_').toLowerCase();
+            if (text && text.length > 2) {
+                return `${role}:${text}`;
+            }
+
+            // Priority 6: Placeholder
+            if (el.placeholder) {
+                return `placeholder:${el.placeholder.slice(0, 30).replace(/\s+/g, '_').toLowerCase()}`;
+            }
+
+            // Fallback
+            return `${el.tagName.toLowerCase()}:${fallbackIndex}`;
+        },
+
+        generateRobustSelector(el) {
+            // Priority 1: data-testid
+            for (const attr of ['data-testid', 'data-test', 'data-cy']) {
+                const val = el.getAttribute(attr);
+                if (val) return `[${attr}="${val}"]`;
+            }
+
+            // Priority 2: ID
+            if (el.id && !/\d{3,}|[-_]\d+$|^:r/.test(el.id)) {
+                return `#${CSS.escape(el.id)}`;
+            }
+
+            // Priority 3: name
+            if (el.name) {
+                const sel = `${el.tagName.toLowerCase()}[name="${el.name}"]`;
+                if (document.querySelectorAll(sel).length === 1) return sel;
+            }
+
+            // Priority 4: aria-label
+            const ariaLabel = el.getAttribute('aria-label');
+            if (ariaLabel) {
+                const sel = `[aria-label="${CSS.escape(ariaLabel)}"]`;
+                try {
+                    if (document.querySelectorAll(sel).length === 1) return sel;
+                } catch (e) { }
+            }
+
+            // Priority 5: type + placeholder
+            if (el.type && el.placeholder) {
+                const sel = `${el.tagName.toLowerCase()}[type="${el.type}"][placeholder="${CSS.escape(el.placeholder)}"]`;
+                try {
+                    if (document.querySelectorAll(sel).length === 1) return sel;
+                } catch (e) { }
+            }
+
+            // Fallback: path from nearest ID'd ancestor
+            let current = el;
+            const path = [];
+            while (current && current !== document.body) {
+                if (current.id && !/\d{3,}/.test(current.id)) {
+                    path.unshift(`#${CSS.escape(current.id)}`);
+                    break;
+                }
+                const parent = current.parentElement;
+                if (parent) {
+                    const siblings = Array.from(parent.children).filter(c => c.tagName === current.tagName);
+                    const index = siblings.indexOf(current);
+                    path.unshift(`${current.tagName.toLowerCase()}:nth-of-type(${index + 1})`);
+                }
+                current = parent;
+            }
+            return path.join(' > ') || el.tagName.toLowerCase();
+        },
+
+        detectInputType(el) {
+            // Rich text editors
+            if (el.closest('[data-contents="true"]') || el.closest('.DraftEditor-root')) return 'draftjs';
+            if (el.closest('.ProseMirror')) return 'prosemirror';
+            if (el.closest('.ql-editor')) return 'quill';
+            if (el.closest('.tox-tinymce')) return 'tinymce';
+            if (el.closest('[data-slate-editor]')) return 'slate';
+            if (el.getAttribute('contenteditable') === 'true') return 'contenteditable';
+            if (el.tagName === 'INPUT') return `input:${el.type || 'text'}`;
+            if (el.tagName === 'TEXTAREA') return 'textarea';
+            if (el.tagName === 'SELECT') return 'select';
+            if (el.tagName === 'BUTTON' || el.getAttribute('role') === 'button') return 'button';
+            if (el.tagName === 'A') return 'link';
+            return 'unknown';
+        },
+
+        getLabel(el) {
+            if (el.id) {
+                const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+                if (label) return label.textContent.trim();
+            }
+            const parentLabel = el.closest('label');
+            if (parentLabel) {
+                const text = parentLabel.textContent.trim();
+                const inputText = el.value || el.textContent || '';
+                return text.replace(inputText, '').trim() || text;
+            }
+            if (el.getAttribute('aria-label')) return el.getAttribute('aria-label');
+            const labelledBy = el.getAttribute('aria-labelledby');
+            if (labelledBy) {
+                const labelEl = document.getElementById(labelledBy);
+                if (labelEl) return labelEl.textContent.trim();
+            }
+            if (el.placeholder) return el.placeholder;
+            if (el.tagName === 'BUTTON' || el.tagName === 'A' || el.getAttribute('role') === 'button') {
+                return (el.textContent || '').trim().slice(0, 50);
+            }
+            if (el.title) return el.title;
+            return null;
+        },
+
+        getCurrentValue(el) {
+            if (el.type === 'checkbox' || el.type === 'radio') return el.checked;
+            if (el.tagName === 'SELECT') return el.options[el.selectedIndex]?.text || el.value;
+            if (el.getAttribute('contenteditable') === 'true') return (el.textContent || '').trim().slice(0, 100);
+            if (el.value !== undefined) return (el.value || '').slice(0, 100);
+            return null;
+        },
+
+        isVisible(el) {
+            if (!el.offsetParent && el.tagName !== 'BODY' && getComputedStyle(el).position !== 'fixed') return false;
+            const style = getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+            const rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+        },
+
+        get(id) {
+            let meta = this.elements.get(id);
+            if (!meta || !document.contains(meta.element)) {
+                this.scan(true);
+                meta = this.elements.get(id);
+            }
+            return meta;
+        },
+
+        getBySelector(selector) {
+            try {
+                return document.querySelector(selector);
+            } catch (e) {
+                return null;
+            }
+        },
+
+        getAll() {
+            this.scan();
+            return Array.from(this.elements.values());
+        },
+
+        getMinimalList() {
+            return this.getAll().map(m => ({
+                id: m.id,
+                type: m.type,
+                label: m.label,
+                enabled: m.enabled,
+                value: m.value
+            }));
+        }
+    };
+
+    // -----------------------------------------------------------------------------
+    // OVERLAY STACK - Track modals, dropdowns, popovers
+    // -----------------------------------------------------------------------------
+    const OverlayStack = {
+        overlays: [],
+
+        scan() {
+            this.overlays = [];
+            const selectors = [
+                '[role="dialog"]', '[role="alertdialog"]', '[role="menu"]', '[role="listbox"]',
+                '[aria-modal="true"]', '[data-state="open"]', '[data-headlessui-state*="open"]',
+                '.modal.show', '.modal.open', '.modal:not(.hidden)',
+                '.MuiModal-root', '.MuiDialog-root', '.MuiPopover-root', '.MuiMenu-root',
+                '.chakra-modal__content', '.ant-modal-wrap:not([style*="display: none"])',
+                '[data-radix-dialog-content]', '[data-radix-popover-content]'
+            ];
+
+            const seen = new Set();
+
+            for (const selector of selectors) {
+                try {
+                    document.querySelectorAll(selector).forEach(el => {
+                        if (seen.has(el) || el.closest('#screenchat-host')) return;
+                        if (!this.isElementVisible(el)) return;
+                        seen.add(el);
+
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width < 50 || rect.height < 30) return;
+
+                        const contentEl = this.findContentElement(el);
+                        this.overlays.push({
+                            element: contentEl || el,
+                            type: this.classifyOverlay(el),
+                            zIndex: parseInt(getComputedStyle(el).zIndex) || 0,
+                            blocking: el.getAttribute('aria-modal') === 'true',
+                            title: this.getTitle(contentEl || el)
+                        });
+                    });
+                } catch (e) { }
+            }
+
+            this.overlays.sort((a, b) => a.zIndex - b.zIndex);
+            return this.overlays;
+        },
+
+        isElementVisible(el) {
+            const style = getComputedStyle(el);
+            return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+        },
+
+        findContentElement(root) {
+            for (const sel of ['[role="dialog"]', '[class*="content"]', '[class*="Content"]', 'form']) {
+                const inner = root.querySelector(sel);
+                if (inner && inner !== root) {
+                    const rect = inner.getBoundingClientRect();
+                    if (rect.width > 50 && rect.height > 50 && rect.width < window.innerWidth * 0.95) return inner;
+                }
+            }
+            return null;
+        },
+
+        classifyOverlay(el) {
+            const role = el.getAttribute('role');
+            const cls = (el.className || '').toLowerCase();
+            if (role === 'dialog' || role === 'alertdialog') return 'dialog';
+            if (role === 'menu') return 'menu';
+            if (role === 'listbox') return 'dropdown';
+            if (/modal/i.test(cls)) return 'modal';
+            if (/drawer/i.test(cls)) return 'drawer';
+            if (/dropdown|menu/i.test(cls)) return 'dropdown';
+            return 'overlay';
+        },
+
+        getTitle(el) {
+            const heading = el.querySelector('h1, h2, h3, [class*="title"], [class*="header"]');
+            if (heading) return heading.textContent.trim().slice(0, 50);
+            return el.getAttribute('aria-label')?.slice(0, 50) || null;
+        },
+
+        getTopOverlay() {
+            this.scan();
+            return this.overlays.length > 0 ? this.overlays[this.overlays.length - 1] : null;
+        },
+
+        getActiveContext() {
+            const top = this.getTopOverlay();
+            if (!top) return { type: 'page', title: document.title, element: document.body, blocking: false };
+            return { type: top.type, title: top.title, element: top.element, blocking: top.blocking };
+        }
+    };
+
+    // -----------------------------------------------------------------------------
+    // INPUT SIMULATOR - Framework-aware input simulation
+    // -----------------------------------------------------------------------------
+    const InputSimulator = {
+        async fill(elementMeta, text) {
+            const { element: el, type } = elementMeta;
+            console.log(`[InputSimulator] Filling ${type} with "${text.slice(0, 30)}..."`);
+
+            if (type.startsWith('input:') || type === 'textarea') return await this.fillStandardInput(el, text);
+            if (type === 'draftjs') return await this.fillDraftJS(el, text);
+            if (type === 'prosemirror') return await this.fillProseMirror(el, text);
+            if (type === 'contenteditable' || type === 'quill' || type === 'slate') return await this.fillContentEditable(el, text);
+            return await this.fillGeneric(el, text);
+        },
+
+        async fillStandardInput(el, text) {
+            el.focus();
+            await sleep(30);
+
+            // React controlled input handling
+            const isReact = Object.keys(el).some(k => k.startsWith('__react'));
+            if (isReact) {
+                const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+                if (setter) setter.call(el, text);
+                else el.value = text;
+            } else {
+                el.value = text;
+            }
+
+            el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+            el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true }));
+            el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+
+            await sleep(50);
+            return this.verify(el, text);
+        },
+
+        async fillDraftJS(el, text) {
+            console.log('[InputSimulator] fillDraftJS starting for:', el);
+
+            // Find the Draft.js editor root and contenteditable
+            let editorRoot = el.closest('.DraftEditor-root') || el.closest('[data-contents]')?.parentElement || el;
+            let editable = editorRoot.querySelector('[contenteditable="true"]') || editorRoot;
+
+            // Twitter-specific: find the actual tweet input area
+            const twitterEditor = el.closest('[data-testid="tweetTextarea_0"]') ||
+                document.querySelector('[data-testid="tweetTextarea_0"]');
+            if (twitterEditor) {
+                editorRoot = twitterEditor;
+                editable = twitterEditor.querySelector('[contenteditable="true"]') || twitterEditor;
+                console.log('[InputSimulator] Found Twitter editor:', editable);
+            }
+
+            // STEP 1: CLICK to activate the editor (not just focus!)
+            // Draft.js needs a real click event sequence to enter edit mode
+            editable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+            await sleep(10);
+            editable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+            await sleep(10);
+            editable.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+            await sleep(50);
+
+            // STEP 2: Focus the element
+            editable.focus();
+            await sleep(50);
+
+            // STEP 3: Set cursor position using Selection API
+            const selection = window.getSelection();
+            const range = document.createRange();
+
+            // Find the text node or create insertion point
+            if (editable.firstChild) {
+                range.selectNodeContents(editable);
+                range.collapse(false); // Collapse to end
+            } else {
+                range.setStart(editable, 0);
+                range.collapse(true);
+            }
+            selection.removeAllRanges();
+            selection.addRange(range);
+            await sleep(30);
+
+            // STEP 4: Clear existing content if any
+            if (editable.textContent && editable.textContent.trim().length > 0) {
+                document.execCommand('selectAll', false, null);
+                await sleep(20);
+                document.execCommand('delete', false, null);
+                await sleep(30);
+            }
+
+            // STEP 5: Type character by character with full event simulation
+            for (let i = 0; i < text.length; i++) {
+                const char = text[i];
+                const keyCode = char.charCodeAt(0);
+
+                // Keyboard events
+                editable.dispatchEvent(new KeyboardEvent('keydown', {
+                    key: char, code: `Key${char.toUpperCase()}`, keyCode, which: keyCode,
+                    bubbles: true, cancelable: true
+                }));
+
+                // beforeinput (Draft.js listens for this)
+                editable.dispatchEvent(new InputEvent('beforeinput', {
+                    inputType: 'insertText', data: char, bubbles: true, cancelable: true
+                }));
+
+                // Insert via execCommand
+                document.execCommand('insertText', false, char);
+
+                // input event
+                editable.dispatchEvent(new InputEvent('input', {
+                    inputType: 'insertText', data: char, bubbles: true
+                }));
+
+                // keyup
+                editable.dispatchEvent(new KeyboardEvent('keyup', {
+                    key: char, code: `Key${char.toUpperCase()}`, keyCode, which: keyCode,
+                    bubbles: true
+                }));
+
+                // Small delay every few chars to let Draft.js process
+                if (i % 5 === 0) await sleep(10);
+            }
+
+            await sleep(150);
+
+            // Verify
+            const result = this.verify(editable, text);
+            console.log('[InputSimulator] fillDraftJS result:', result);
+            return result;
+        },
+
+        async fillProseMirror(el, text) {
+            const editor = el.closest('.ProseMirror') || el;
+            editor.focus();
+            await sleep(50);
+
+            document.execCommand('selectAll', false, null);
+            await sleep(20);
+            document.execCommand('delete', false, null);
+            await sleep(20);
+
+            for (let i = 0; i < text.length; i++) {
+                const char = text[i];
+                editor.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: char, bubbles: true, cancelable: true }));
+                document.execCommand('insertText', false, char);
+                editor.dispatchEvent(new InputEvent('input', { inputType: 'insertText', data: char, bubbles: true }));
+                if (i % 10 === 0) await sleep(5);
+            }
+
+            await sleep(100);
+            return this.verify(editor, text);
+        },
+
+        async fillContentEditable(el, text) {
+            el.focus();
+            await sleep(50);
+            document.execCommand('selectAll', false, null);
+            await sleep(20);
+            document.execCommand('insertText', false, text);
+            el.dispatchEvent(new InputEvent('input', { inputType: 'insertText', data: text, bubbles: true }));
+            await sleep(50);
+            return this.verify(el, text);
+        },
+
+        async fillGeneric(el, text) {
+            el.focus();
+            await sleep(30);
+            if ('value' in el) {
+                el.value = text;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            } else if (el.getAttribute('contenteditable')) {
+                return await this.fillContentEditable(el, text);
+            } else {
+                el.textContent = text;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+            await sleep(50);
+            return this.verify(el, text);
+        },
+
+        verify(el, expected) {
+            const actual = (el.value || el.textContent || el.innerText || '').trim();
+            const success = actual.includes(expected.trim()) || actual.length > 0;
+            console.log(`[InputSimulator] Verify: expected "${expected.slice(0, 30)}", got "${actual.slice(0, 30)}", success: ${success}`);
+            return { success, expected, actual, element: el };
+        },
+
+        async click(elementMeta) {
+            const { element: el } = elementMeta;
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            await sleep(100);
+            this.highlight(el);
+            el.focus();
+            el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+            el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+            el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+            if (typeof el.click === 'function') el.click();
+            await sleep(100);
+            return { success: true };
+        },
+
+        async select(elementMeta, value) {
+            const { element: el } = elementMeta;
+            el.focus();
+            this.highlight(el);
+            let option = Array.from(el.options).find(o => o.value === value);
+            if (!option) option = Array.from(el.options).find(o => o.text.toLowerCase().includes(value.toLowerCase()));
+            if (option) {
+                el.value = option.value;
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                return { success: true, selected: option.text };
+            }
+            return { success: false, error: 'Option not found' };
+        },
+
+        async check(elementMeta, checked = true) {
+            const { element: el } = elementMeta;
+            el.focus();
+            this.highlight(el);
+            el.checked = checked;
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new Event('click', { bubbles: true }));
+            return { success: el.checked === checked };
+        },
+
+        highlight(el) {
+            const orig = el.style.outline;
+            el.style.outline = '3px solid #4285F4';
+            el.style.outlineOffset = '2px';
+            setTimeout(() => { el.style.outline = orig; el.style.outlineOffset = ''; }, 1000);
+        }
+    };
+
+    // -----------------------------------------------------------------------------
+    // TASK PLANNER - Plan once, execute locally
+    // -----------------------------------------------------------------------------
+    const TaskPlanner = {
+        currentPlan: null,
+        currentGoal: null,
+        executionState: { stepIndex: 0, completed: [], failed: [] },
+
+        reset() {
+            this.currentPlan = null;
+            this.currentGoal = null;
+            this.executionState = { stepIndex: 0, completed: [], failed: [] };
+        },
+
+        setPlan(plan, goal) {
+            this.currentPlan = plan;
+            this.currentGoal = goal;
+            this.executionState = { stepIndex: 0, completed: [], failed: [] };
+        },
+
+        hasPlan() {
+            return this.currentPlan?.steps?.length > 0;
+        },
+
+        getNextStep() {
+            if (!this.currentPlan?.steps) return null;
+            return this.currentPlan.steps[this.executionState.stepIndex] || null;
+        },
+
+        markStepComplete(step, result) {
+            this.executionState.completed.push({ step, result });
+            this.executionState.stepIndex++;
+        },
+
+        markStepFailed(step, reason) {
+            this.executionState.failed.push({ step, reason });
+        },
+
+        isComplete() {
+            if (!this.currentPlan?.steps) return true;
+            return this.executionState.stepIndex >= this.currentPlan.steps.length;
+        },
+
+        async executeStep(step) {
+            console.log(`[TaskPlanner] Executing: ${step.action} on ${step.elementId || step.selector}`);
+
+            let elementMeta = null;
+            if (step.elementId) elementMeta = ElementRegistry.get(step.elementId);
+            if (!elementMeta && step.selector) {
+                const el = ElementRegistry.getBySelector(step.selector);
+                if (el) elementMeta = { element: el, type: ElementRegistry.detectInputType(el), label: ElementRegistry.getLabel(el) };
+            }
+
+            if (!elementMeta && !['wait', 'scroll_page', 'observe'].includes(step.action)) {
+                return { success: false, reason: 'element_not_found', needsReplan: true };
+            }
+
+            try {
+                switch (step.action) {
+                    case 'fill': return await InputSimulator.fill(elementMeta, step.value);
+                    case 'click': return await InputSimulator.click(elementMeta);
+                    case 'select': return await InputSimulator.select(elementMeta, step.value);
+                    case 'check': return await InputSimulator.check(elementMeta, step.checked !== false);
+                    case 'wait': await sleep(step.duration || 1000); return { success: true };
+                    case 'scroll_page':
+                        window.scrollBy(0, step.direction === 'up' ? -(step.amount || 300) : (step.amount || 300));
+                        await sleep(200);
+                        return { success: true };
+                    case 'press_enter':
+                        elementMeta.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+                        elementMeta.element.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+                        return { success: true };
+                    case 'observe':
+                        return { success: true };
+                    default:
+                        return { success: false, reason: `Unknown action: ${step.action}` };
+                }
+            } catch (e) {
+                console.error('[TaskPlanner] Error:', e);
+                return { success: false, reason: e.message };
+            }
+        },
+
+        getProgress() {
+            if (!this.currentPlan?.steps) return { total: 0, completed: 0, current: null };
+            return {
+                total: this.currentPlan.steps.length,
+                completed: this.executionState.stepIndex,
+                current: this.getNextStep(),
+                goal: this.currentGoal
+            };
+        }
+    };
+
+    // -----------------------------------------------------------------------------
+    // CONTEXT BUILDER - Minimal context for LLM
+    // -----------------------------------------------------------------------------
+    const ContextBuilder = {
+        modes: {
+            PLAN: { screenshot: 'viewport', elements: 'all', overlay: true },
+            EXECUTE: { screenshot: false, elements: 'active', overlay: true },
+            DIAGNOSE: { screenshot: 'viewport', elements: 'active', overlay: true },
+            CONTINUE: { screenshot: 'viewport', elements: 'active', overlay: true }
+        },
+
+        async build(mode = 'PLAN') {
+            const config = this.modes[mode] || this.modes.PLAN;
+            const context = { url: window.location.href, title: document.title, mode };
+
+            OverlayStack.scan();
+            ElementRegistry.scan(true);
+
+            if (config.overlay) {
+                const active = OverlayStack.getActiveContext();
+                context.activeContext = { type: active.type, title: active.title, blocking: active.blocking };
+            }
+
+            if (config.elements === 'all') {
+                context.elements = ElementRegistry.getMinimalList();
+            } else if (config.elements === 'active') {
+                const top = OverlayStack.getTopOverlay();
+                if (top) {
+                    context.elements = ElementRegistry.getAll()
+                        .filter(m => top.element.contains(m.element))
+                        .map(m => ({ id: m.id, type: m.type, label: m.label, enabled: m.enabled, value: m.value }));
+                } else {
+                    context.elements = ElementRegistry.getMinimalList().slice(0, 30);
+                }
+            }
+
+            if (config.screenshot === 'viewport') {
+                try {
+                    if (container) container.style.visibility = 'hidden';
+                    await sleep(50);
+                    context.screenshot = await captureViewport();
+                    if (container) container.style.visibility = 'visible';
+                } catch (e) {
+                    if (container) container.style.visibility = 'visible';
+                }
+            }
+
+            if (TaskPlanner.hasPlan()) {
+                context.taskProgress = TaskPlanner.getProgress();
+            }
+
+            return context;
+        },
+
+        formatForLLM(context) {
+            let msg = `[Page: ${context.url}]`;
+            if (context.activeContext?.type !== 'page') {
+                msg += `\n[Active: ${context.activeContext.type}${context.activeContext.title ? ` - "${context.activeContext.title}"` : ''}]`;
+            }
+            if (context.taskProgress) {
+                msg += `\n[Progress: ${context.taskProgress.completed + 1}/${context.taskProgress.total}]`;
+            }
+            if (context.elements?.length > 0) {
+                msg += `\n[Elements: ${context.elements.length} available]`;
+                const list = context.elements.slice(0, 15).map(e => `  ${e.id}: ${e.type} "${e.label || '-'}"${e.enabled ? '' : ' (disabled)'}`).join('\n');
+                msg += `\n${list}`;
+            }
+            return msg;
+        }
+    };
 
     // --- Message Cleaning Helpers ---
     function cleanUserMessage(message) {
@@ -606,79 +1340,40 @@
             // Show Loading Bubble
             const loadingId = addLoadingMessage();
 
-            // Detect active context (modal, dialog, etc.) and extract fields
-            const activeContext = detectActiveContext();
-            const formFields = extractFormFields(activeContext);
-            const domStructure = extractDOMStructure(activeContext);
+            // NEW: Use ContextBuilder for minimal, structured context
+            const context = await ContextBuilder.build('PLAN');
+            const contextString = ContextBuilder.formatForLLM(context);
 
-            // Build rich context for the AI
-            const buildContextString = () => {
-                let ctx = `[Current Page: ${currentUrl}]`;
-
-                // Active context (modal/dialog awareness)
-                if (activeContext.type !== 'page') {
-                    ctx += `\n[ACTIVE CONTEXT: ${activeContext.description}]`;
-                    ctx += `\n[IMPORTANT: A ${activeContext.type} is currently open. Target elements INSIDE this ${activeContext.type}, not the background page.]`;
-                    if (activeContext.containerSelector) {
-                        ctx += `\n[${activeContext.type} selector: ${activeContext.containerSelector}]`;
-                    }
-                }
-
-                // DOM Structure summary
-                if (domStructure.headings.length > 0) {
-                    ctx += `\n[Page headings: ${domStructure.headings.map(h => h.text).join(' > ')}]`;
-                }
-
-                // Form fields (only those in active context if modal is open)
-                if (formFields.length > 0) {
-                    const relevantFields = activeContext.type !== 'page'
-                        ? formFields.filter(f => f.inActiveContext)
-                        : formFields;
-
-                    if (relevantFields.length > 0) {
-                        ctx += `\n[Form Fields in ${activeContext.type !== 'page' ? activeContext.type : 'page'}: ${JSON.stringify(relevantFields)}]`;
-                    }
-                }
-
-                // Key buttons/actions available
-                if (domStructure.interactiveElements.length > 0) {
-                    const relevantButtons = activeContext.type !== 'page'
-                        ? domStructure.interactiveElements.filter(b => b.isInActiveContext)
-                        : domStructure.interactiveElements.slice(0, 10);
-
-                    if (relevantButtons.length > 0) {
-                        ctx += `\n[Available actions: ${relevantButtons.map(b => `"${b.text}" (${b.selector})`).join(', ')}]`;
-                    }
-                }
-
-                return ctx;
-            };
-
-            // Send to Backend with rich context
+            // Send to Backend with minimal context (NO raw HTML!)
             const messagesPayload = conversationHistory.map((m, idx) => {
                 if (idx === conversationHistory.length - 1 && m.role === 'user') {
-                    return { role: 'user', content: `${buildContextString()}\n\n${m.content}` };
+                    return { role: 'user', content: `${contextString}\n\n${m.content}` };
                 }
                 return m;
             });
 
             try {
-                console.log('[ScreenChat] Sending request to backend...');
-                console.log('[ScreenChat] URL:', 'http://localhost:3000/api/chat');
-                console.log('[ScreenChat] Payload size:', JSON.stringify({ messages: messagesPayload, userId, sessionId, sessionUrl }).length);
+                console.log('[ScreenChat] Sending request with minimal context...');
+                console.log('[ScreenChat] Elements:', context.elements?.length || 0);
+                console.log('[ScreenChat] Payload size:', JSON.stringify({ messages: messagesPayload, userId, sessionId }).length);
+
+                // Create AbortController for this request
+                currentAbortController = new AbortController();
 
                 const response = await fetch('http://localhost:3000/api/chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         messages: messagesPayload,
-                        image: screenshotDataUrl,
+                        image: screenshotDataUrl || context.screenshot,
                         userId: userId,
                         sessionId: sessionId,
                         sessionUrl: sessionUrl,
-                        screenshotType: 'full', // Default for initial connection
-                        htmlSnapshot: domStructure ? getCleanedHTML(activeContext.container || document.body) : null
-                    })
+                        screenshotType: context.screenshot ? 'viewport' : 'full',
+                        elements: context.elements,
+                        activeContext: context.activeContext
+                    }),
+                    signal: currentAbortController.signal
                 });
 
                 console.log('[ScreenChat] Response status:', response.status);
@@ -710,6 +1405,7 @@
                     chrome.storage.local.remove(['sc_task_active']);
                     updateTaskProgressUI({ inProgress: false });
                     setInputState(true);
+                    TaskPlanner.reset(); // Clean up task state
                 } else if (parsed.status === 'waiting_for_input') {
                     // AI needs more info from user - pause task but keep UI active
                     setInputState(true, "Type your response...");
@@ -728,6 +1424,12 @@
                 }
 
             } catch (backendErr) {
+                // Handle abort errors gracefully (user cancelled)
+                if (backendErr.name === 'AbortError' || taskCancelled) {
+                    console.log('[ScreenChat] Request aborted by user');
+                    removeMessage(loadingId);
+                    return; // Don't show error message for intentional cancellation
+                }
                 console.error('Backend error:', backendErr);
                 removeMessage(loadingId);
                 setInputState(true);
@@ -740,6 +1442,12 @@
         };
 
         const handleAutoContinue = async () => {
+            // Check if task was cancelled
+            if (taskCancelled) {
+                console.log('[AutoContinue] Aborted - task was cancelled');
+                return;
+            }
+
             // Check for loops BEFORE continuing
             const loopStatus = getLoopStatus();
             if (loopStatus.stuck) {
@@ -756,31 +1464,17 @@
 
             setInputState(false, 'Analyzing results...');
 
-            // Brief stabilization wait (shorter than before - we use viewport now)
-            await sleep(800);
+            // Brief stabilization wait
+            await sleep(600);
 
             const loadingId = addLoadingMessage("Checking progress...");
 
-            // Use ADAPTIVE context - viewport screenshot by default, much faster
+            // NEW: Use ContextBuilder for minimal continuation context
             let context;
             try {
-                container.style.display = 'none';
-                await sleep(100);
-
-                // Build adaptive context with viewport screenshot (not full page!)
-                context = await buildAdaptiveContext({
-                    includeScreenshot: true,
-                    screenshotMode: 'viewport', // KEY: viewport only, not full page
-                    includeDOM: true,
-                    includeForms: true,
-                    includeScrollable: true,
-                    includeActionHistory: true
-                });
-
-                container.style.display = 'flex';
+                context = await ContextBuilder.build('CONTINUE');
             } catch (e) {
                 console.error("Context build failed", e);
-                container.style.display = 'flex';
                 removeMessage(loadingId);
                 setInputState(true);
                 updateTaskProgressUI({ inProgress: false });
@@ -789,19 +1483,30 @@
             }
 
             // Format context for AI message
-            const contextMessage = formatContextForAI(context);
+            const contextMessage = ContextBuilder.formatForLLM(context);
 
             // Construct messages payload
             const messagesPayload = [...conversationHistory];
 
-            // Append continuation with rich context
+            // Append continuation with minimal context
             messagesPayload.push({
                 role: "user",
                 content: `${contextMessage}\n\ncontinue`
             });
 
             try {
-                console.log('[ScreenChat] Continuing with viewport context...');
+                // Check cancellation before fetch
+                if (taskCancelled) {
+                    removeMessage(loadingId);
+                    return;
+                }
+
+                console.log('[ScreenChat] Continuing with minimal context...');
+                console.log('[ScreenChat] Elements:', context.elements?.length || 0);
+
+                // Create AbortController for this request
+                currentAbortController = new AbortController();
+
                 const response = await fetch('http://localhost:3000/api/chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -811,9 +1516,11 @@
                         userId: userId,
                         sessionId: sessionId,
                         sessionUrl: sessionUrl,
-                        screenshotType: context.screenshotType, // Tell backend what kind of screenshot this is
-                        htmlSnapshot: context.htmlSnapshot
-                    })
+                        screenshotType: 'viewport',
+                        elements: context.elements,
+                        activeContext: context.activeContext
+                    }),
+                    signal: currentAbortController.signal
                 });
 
                 if (!response.ok) throw new Error('Backend failed');
@@ -845,12 +1552,14 @@
                     // Reset tracking
                     actionHistory = [];
                     recentActions = [];
+                    TaskPlanner.reset(); // Clean up task state
                 } else if (parsed.status === 'waiting_for_input') {
                     setInputState(true, "Type your response...");
                 } else if (parsed.status === 'stuck' || parsed.status === 'failed') {
                     // AI acknowledged being stuck
                     setInputState(true, "Help me continue...");
                     chrome.storage.local.remove(['sc_task_active']);
+                    TaskPlanner.reset(); // Clean up task state
                     updateTaskProgressUI({ inProgress: false });
                 } else if (parsed.actions && parsed.actions.length > 0) {
                     chrome.storage.local.set({ 'sc_task_active': true });
@@ -887,6 +1596,12 @@
                 }
 
             } catch (e) {
+                // Handle abort errors gracefully (user cancelled)
+                if (e.name === 'AbortError' || taskCancelled) {
+                    console.log('[AutoContinue] Request aborted by user');
+                    removeMessage(loadingId);
+                    return; // Don't show error message for intentional cancellation
+                }
                 console.error("Auto-continue failed", e);
                 removeMessage(loadingId);
                 setInputState(true);
@@ -897,18 +1612,29 @@
         };
 
         // SPA Continuation Logic
-        let continueTimeout = null;
         function scheduleAutoContinue() {
-            if (continueTimeout) clearTimeout(continueTimeout);
-            continueTimeout = setTimeout(() => {
-                // Check if still active (page didn't reload, user didn't cancel)
+            if (continueTimeoutRef) clearTimeout(continueTimeoutRef);
+
+            // Don't schedule if cancelled
+            if (taskCancelled) {
+                console.log('[AutoContinue] Skipped - task was cancelled');
+                return;
+            }
+
+            continueTimeoutRef = setTimeout(() => {
+                // Check if cancelled or still active
+                if (taskCancelled) {
+                    console.log('[AutoContinue] Aborted - task was cancelled');
+                    return;
+                }
+
                 chrome.storage.local.get(['sc_task_active'], (res) => {
-                    if (res.sc_task_active) {
-                        console.log('SPA navigation detected (timeout) - continuing task...');
+                    if (res.sc_task_active && !taskCancelled) {
+                        console.log('[AutoContinue] Continuing task...');
                         handleAutoContinue();
                     }
                 });
-            }, 4000); // 4 seconds delay for animations/modals
+            }, 4000);
         }
 
         sendBtn.addEventListener('click', handleSend);
@@ -2039,9 +2765,11 @@
         }
     }
 
-    // --- Execute Actions ---
+    // --- Execute Actions (NEW - Uses InputSimulator & ElementRegistry) ---
     async function executeActions(actions) {
         if (isExecutingActions) return { results: [], anySuccess: false };
+        if (taskCancelled) return { results: [], anySuccess: false, cancelled: true };
+
         isExecutingActions = true;
 
         const actionResults = [];
@@ -2050,161 +2778,86 @@
         // Capture page state BEFORE actions
         const pageStateBefore = getPageStateSignature();
 
+        // Ensure registry is fresh
+        ElementRegistry.scan(true);
+
         for (const action of actions) {
-            // Capture state before this specific action
+            // Check for cancellation at start of each action
+            if (taskCancelled) {
+                console.log('[Action] Loop aborted - task cancelled');
+                break;
+            }
+
             const actionStateBefore = getPageStateSignature();
 
             try {
-                await sleep(300); // Small delay between actions for visual feedback
+                await sleep(200); // Small delay for visual feedback
 
-                let success = false;
-                let el = null;
+                let result = { success: false };
 
-                // Handle actions that don't need an element
-                if (action.type === 'scroll_page') {
-                    // Scroll the main page
-                    const scrollAmount = action.amount || 400;
-                    if (action.direction === 'up') {
-                        window.scrollBy(0, -scrollAmount);
-                    } else {
-                        window.scrollBy(0, scrollAmount);
-                    }
-                    await sleep(300);
-                    success = true;
-                } else if (action.type === 'scroll_in') {
-                    // Scroll within a specific container
-                    el = document.querySelector(action.selector);
+                // Build step for TaskPlanner format
+                const step = {
+                    action: action.type,
+                    elementId: action.elementId,
+                    selector: action.selector,
+                    value: action.value,
+                    direction: action.direction,
+                    amount: action.amount,
+                    duration: action.duration,
+                    checked: action.checked
+                };
+
+                // Handle scroll_in separately (not in TaskPlanner)
+                if (action.type === 'scroll_in') {
+                    const el = ElementRegistry.getBySelector(action.selector);
                     if (el) {
                         const scrollAmount = action.amount || 200;
-                        if (action.direction === 'up') {
-                            el.scrollTop -= scrollAmount;
-                        } else {
-                            el.scrollTop += scrollAmount;
-                        }
-                        await sleep(300);
-                        success = true;
-                        console.log(`[Action] Scrolled ${action.direction} in ${action.selector}`);
+                        el.scrollTop += action.direction === 'up' ? -scrollAmount : scrollAmount;
+                        await sleep(200);
+                        result = { success: true };
                     } else {
-                        console.warn(`[Action] Scroll container not found: ${action.selector}`);
+                        result = { success: false, reason: 'element_not_found' };
                     }
-                } else if (action.type === 'wait') {
-                    const duration = action.duration || 1000;
-                    await sleep(duration);
-                    success = true;
-                } else if (action.type === 'observe') {
-                    // Just observe - no action needed, triggers context refresh
-                    success = true;
-                    console.log('[Action] Observe - refreshing context');
+                } else if (action.type === 'submit') {
+                    // Handle submit action
+                    const el = ElementRegistry.getBySelector(action.selector);
+                    if (el) {
+                        const form = el.closest('form') || el;
+                        if (form.submit) form.submit();
+                        else el.click();
+                        result = { success: true };
+                    } else {
+                        result = { success: false, reason: 'element_not_found' };
+                    }
+                } else if (action.type === 'scroll') {
+                    // Legacy scroll action
+                    window.scrollBy(0, action.direction === 'up' ? -(action.amount || 300) : (action.amount || 300));
+                    await sleep(200);
+                    result = { success: true };
                 } else {
-                    // Actions that need an element
-                    el = await findElementWithRetry(action.selector, action.type);
-
-                    if (!el) {
-                        console.warn(`[Action] Element not found: ${action.selector}`);
-                        const actionStateAfter = getPageStateSignature();
-                        recordAction(action, 'element_not_found', actionStateBefore, actionStateAfter);
-                        consecutiveFailures++;
-                        actionResults.push({ action, success: false, error: 'Element not found' });
-                        continue;
-                    }
-
-                    console.log(`[Action] ${action.type} on:`, el, 'selector:', action.selector);
-
-                    switch (action.type) {
-                        case 'fill':
-                            highlightElement(el);
-                            el.focus();
-                            el.value = '';
-                            el.dispatchEvent(new Event('input', { bubbles: true }));
-                            el.value = action.value;
-                            el.dispatchEvent(new Event('input', { bubbles: true }));
-                            el.dispatchEvent(new Event('change', { bubbles: true }));
-                            el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
-                            // For contenteditable divs
-                            if (el.getAttribute('contenteditable') === 'true') {
-                                el.textContent = action.value;
-                                el.dispatchEvent(new Event('input', { bubbles: true }));
-                            }
-                            success = el.value === action.value || el.textContent === action.value;
-                            break;
-
-                        case 'click':
-                            highlightElement(el);
-                            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                            await sleep(150);
-                            el.click();
-                            success = true;
-                            break;
-
-                        case 'select':
-                            highlightElement(el);
-                            el.value = action.value;
-                            el.dispatchEvent(new Event('change', { bubbles: true }));
-                            success = el.value === action.value;
-                            break;
-
-                        case 'check':
-                            highlightElement(el);
-                            el.checked = action.checked !== false;
-                            el.dispatchEvent(new Event('change', { bubbles: true }));
-                            success = el.checked === (action.checked !== false);
-                            break;
-
-                        case 'scroll':
-                            // Legacy scroll action (whole page)
-                            const scrollAmt = action.amount || 300;
-                            if (action.direction === 'up') {
-                                window.scrollBy(0, -scrollAmt);
-                            } else {
-                                window.scrollBy(0, scrollAmt);
-                            }
-                            await sleep(300);
-                            success = true;
-                            break;
-
-                        case 'submit':
-                            // Submit a form
-                            const form = el.closest('form') || el;
-                            if (form.submit) {
-                                form.submit();
-                            } else {
-                                el.click();
-                            }
-                            success = true;
-                            break;
-
-                        case 'press_enter':
-                            // Press Enter key on element
-                            highlightElement(el);
-                            el.focus();
-                            el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-                            el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-                            success = true;
-                            break;
-
-                        default:
-                            console.warn(`Unknown action type: ${action.type}`);
-                    }
+                    // Use TaskPlanner.executeStep for standard actions
+                    result = await TaskPlanner.executeStep(step);
                 }
 
                 // Record action with state change detection
                 const actionStateAfter = getPageStateSignature();
                 const stateChanged = hasPageStateChanged(actionStateBefore, actionStateAfter);
 
-                if (success) {
+                if (result.success) {
                     consecutiveFailures = 0;
                     anySuccess = true;
                     recordAction(action, 'success', actionStateBefore, actionStateAfter);
-                    console.log(`[Action] Success, state changed: ${stateChanged}`);
+                    console.log(`[Action] Success: ${action.type}, state changed: ${stateChanged}`);
                 } else {
                     consecutiveFailures++;
-                    recordAction(action, 'failed', actionStateBefore, actionStateAfter);
+                    recordAction(action, result.reason || 'failed', actionStateBefore, actionStateAfter);
+                    console.warn(`[Action] Failed: ${action.type} - ${result.reason}`);
                 }
 
-                actionResults.push({ action, success, stateChanged });
+                actionResults.push({ action, success: result.success, stateChanged, details: result });
 
             } catch (err) {
-                console.error(`[Action] Failed:`, action, err);
+                console.error(`[Action] Error:`, action, err);
                 const actionStateAfter = getPageStateSignature();
                 recordAction(action, err.message, actionStateBefore, actionStateAfter);
                 consecutiveFailures++;
@@ -2216,14 +2869,12 @@
         const pageStateAfter = getPageStateSignature();
         const overallStateChanged = hasPageStateChanged(pageStateBefore, pageStateAfter);
 
-        // Log summary
         const successCount = actionResults.filter(r => r.success).length;
-        console.log(`[Actions] Completed ${successCount}/${actions.length} actions, overall state changed: ${overallStateChanged}`);
+        console.log(`[Actions] Completed ${successCount}/${actions.length}, state changed: ${overallStateChanged}`);
 
-        // Store last page state for future comparisons
         lastPageState = pageStateAfter;
-
         isExecutingActions = false;
+
         return {
             results: actionResults,
             anySuccess,
@@ -2375,22 +3026,54 @@
     }
 
     async function cancelCurrentTask() {
-        try {
-            const response = await fetch('http://localhost:3000/api/task/cancel', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ sessionId })
-            });
-            const data = await response.json();
-            if (data.success) {
-                chrome.storage.local.remove(['sc_task_active']);
-                updateTaskProgressUI({ inProgress: false });
-                setInputState(true);
-                addMessage("Task cancelled.", 'ai');
-            }
-        } catch (e) {
-            console.error('Failed to cancel task:', e);
+        console.log('[Cancel] Cancelling current task...');
+
+        // 1. Set cancel flag to stop loops
+        taskCancelled = true;
+
+        // 2. Abort any in-flight fetch requests
+        if (currentAbortController) {
+            currentAbortController.abort();
+            currentAbortController = null;
         }
+
+        // 3. Clear auto-continue timer
+        if (continueTimeoutRef) {
+            clearTimeout(continueTimeoutRef);
+            continueTimeoutRef = null;
+        }
+
+        // 4. Reset execution state
+        isExecutingActions = false;
+        isCapturing = false;
+
+        // 5. Reset TaskPlanner
+        TaskPlanner.reset();
+
+        // 6. Clear action history
+        actionHistory = [];
+        recentActions = [];
+        consecutiveFailures = 0;
+
+        // 7. Update UI immediately
+        chrome.storage.local.remove(['sc_task_active']);
+        updateTaskProgressUI({ inProgress: false });
+        setInputState(true);
+        addMessage("Task cancelled.", 'ai');
+
+        // 8. Notify backend (don't await - fire and forget)
+        fetch('http://localhost:3000/api/task/cancel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId })
+        }).catch(e => console.error('[Cancel] Backend notify failed:', e));
+
+        // 9. Reset cancel flag after a short delay (for new tasks)
+        setTimeout(() => {
+            taskCancelled = false;
+        }, 500);
+
+        console.log('[Cancel] Task cancelled successfully');
     }
 
     init();
