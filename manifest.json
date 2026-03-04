@@ -1,19 +1,17 @@
 {
     "manifest_version": 3,
-    "name": "ScreenChat - AI Agent for Your Browser",
+    "name": "ScreenChat - AI Chat for Your Browser",
     "version": "1.0.0",
-    "description": "Chat with your screen. AI agent that sees your page, answers questions, helps fill forms, and assists with tasks.",
+    "description": "Chat with your screen. AI chat that sees your page and helps answer questions.",
     "permissions": [
         "activeTab",
-        "tabs",
         "storage",
-        "downloads",
         "scripting"
     ],
     "host_permissions": [
-        "<all_urls>",
-        "https://screenchat-backend-production.up.railway.app/*",
-        "http://localhost:3000/*"
+        "http://localhost/*",
+        "http://127.0.0.1/*",
+        "https://screenchat-backend-production.up.railway.app/*"
     ],
     "action": {
         "default_icon": {
@@ -21,6 +19,15 @@
             "32": "icons/icon32.png",
             "48": "icons/icon48.png",
             "128": "icons/icon128.png"
+        }
+    },
+    "commands": {
+        "toggle-screenchat": {
+            "suggested_key": {
+                "default": "Ctrl+Shift+Y",
+                "mac": "Command+Shift+Y"
+            },
+            "description": "Open or toggle ScreenChat on the current tab"
         }
     },
     "icons": {
@@ -31,22 +38,6 @@
     },
     "background": {
         "service_worker": "background.js"
-    },
-    "commands": {
-        "capture-visible": {
-            "suggested_key": {
-                "default": "Ctrl+Shift+S",
-                "mac": "Command+Shift+S"
-            },
-            "description": "Capture visible area"
-        },
-        "capture-full": {
-            "suggested_key": {
-                "default": "Ctrl+Shift+F",
-                "mac": "Command+Shift+F"
-            },
-            "description": "Capture full page"
-        }
     },
     "web_accessible_resources": [
         {

@@ -1,13 +1,12 @@
-# ScreenChat - AI Agent for Your Browser
+# ScreenChat - Chat With Your Browser
 
 **Chat with your screen. Your AI that sees, understands, and helps.**
 
-ScreenChat is a Chrome extension that brings an AI agent directly to your browser. Chat about any webpage, get help filling forms, research content, or let the AI assist with any task — it sees exactly what you see.
+ScreenChat is a Chrome extension that brings AI chat directly to your browser. Ask about any webpage, summarize content, and get contextual help based on what you see.
 
 ## ✨ Features
 
 - **🤖 AI-Powered Chat** - Ask questions about any webpage and get intelligent answers
-- **📸 Smart Screen Capture** - Automatically captures pages for visual context (only when needed)
 - **🔐 Google Sign-In** - Secure authentication to sync your chat history
 - **💬 Persistent Conversations** - Your chats are saved and organized by website
 - **⚡ Fast & Lightweight** - Non-intrusive sidebar that works on any site
@@ -17,7 +16,7 @@ ScreenChat is a Chrome extension that brings an AI agent directly to your browse
 - **Research Assistant** - Summarize articles, explain complex content
 - **Shopping Helper** - Compare products, find deals, get recommendations
 - **Learning Tool** - Ask questions about educational content
-- **Work Assistant** - Get help with forms, documentation, data analysis
+- **Work Assistant** - Get help understanding forms, documentation, and data
 - **Accessibility** - Describe page content, assist with navigation
 
 ## 🔑 Keywords
@@ -29,13 +28,19 @@ AI assistant, ChatGPT extension, AI browser assistant, webpage analyzer, screen 
 1. Download from Chrome Web Store (link coming soon)
 2. Click the ScreenChat icon in your toolbar
 3. Start chatting about any webpage!
+4. Use `Ctrl+Shift+Y` (`Command+Shift+Y` on Mac) to open/toggle ScreenChat quickly
 
 ## 🔒 Privacy
 
 - Your data is encrypted and stored securely
-- We only capture screenshots when you're actively chatting
 - Sign in with Google for secure authentication
 - No data is shared with third parties
+
+## 🧩 UI Attribution
+
+- Parts of the V2 interaction treatment were adapted from 21st.dev community component patterns under MIT-style licensing.
+- Inspired patterns include text shimmer status treatment, typewriter onboarding, and custom select interaction behavior.
+- ScreenChat implementation remains native vanilla JavaScript/CSS and does not bundle third-party UI runtimes.
 
 ## 📧 Support
 

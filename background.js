@@ -4,26 +4,125 @@ chrome.runtime.onInstalled.addListener(() => {
     console.log('ScreenChat extension installed');
 });
 
-// Track injected tabs to avoid re-injecting
-const injectedTabs = new Set();
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message?.action !== 'capture_visible_tab') return undefined;
 
-chrome.action.onClicked.addListener(async (tab) => {
-    // Prevent injection in restricted pages
-    if (tab.url.startsWith('chrome://') || tab.url.startsWith('edge://')) return;
-
-    if (injectedTabs.has(tab.id)) {
-        // Already injected, toggle visibility
+    (async () => {
         try {
-            await chrome.tabs.sendMessage(tab.id, { action: 'toggle_ui' });
-        } catch (e) {
-            // If sending fails (e.g. page refreshed), re-inject
-            injectedTabs.delete(tab.id);
-            injectContentScript(tab);
+            const windowId = sender?.tab?.windowId;
+            const image = await chrome.tabs.captureVisibleTab(windowId, { format: 'png' });
+            sendResponse({ ok: true, image });
+        } catch (error) {
+            console.error('Screen capture failed:', error);
+            sendResponse({ ok: false, error: 'Unable to capture current screen' });
         }
-    } else {
-        injectContentScript(tab);
-    }
+    })();
+
+    return true;
 });
+
+function isRestrictedUrl(url = '') {
+    return (
+        url.startsWith('chrome://') ||
+        url.startsWith('edge://') ||
+        url.startsWith('about:') ||
+        url.startsWith('chrome-extension://')
+    );
+}
+
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function openUi(tabId, attempts = 3) {
+    return sendUiAction(tabId, 'open_ui', attempts);
+}
+
+async function toggleUi(tabId, attempts = 3) {
+    return sendUiAction(tabId, 'hotkey_toggle_ui', attempts);
+}
+
+async function sendUiAction(tabId, action, attempts = 3) {
+    let lastError = null;
+    for (let i = 0; i < attempts; i += 1) {
+        try {
+            await chrome.tabs.sendMessage(tabId, { action });
+            return;
+        } catch (e) {
+            lastError = e;
+            if (i === attempts - 1) break;
+            await sleep(80);
+        }
+    }
+    throw lastError || new Error(`Failed to send UI action: ${action}`);
+}
+
+async function activateScreenChat(tab) {
+    if (!tab?.id || isRestrictedUrl(tab.url || '')) {
+        return;
+    }
+    await dispatchUiAction(tab, 'open_ui');
+}
+
+function defer(task, delayMs = 220) {
+    setTimeout(() => {
+        Promise.resolve()
+            .then(task)
+            .catch((error) => console.error('Deferred task failed:', error));
+    }, delayMs);
+}
+
+chrome.action.onClicked.addListener((tab) => {
+    defer(async () => {
+        try {
+            await activateScreenChat(tab);
+        } catch (err) {
+            console.error('ScreenChat action click failed:', err);
+        }
+    });
+});
+
+chrome.commands.onCommand.addListener((command) => {
+    if (command !== 'toggle-screenchat') return;
+
+    defer(async () => {
+        try {
+            const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            if (!activeTab) return;
+            await toggleScreenChatWithHotkey(activeTab);
+        } catch (err) {
+            console.error('ScreenChat hotkey command failed:', err);
+        }
+    });
+});
+
+async function toggleScreenChatWithHotkey(tab) {
+    if (!tab?.id || isRestrictedUrl(tab.url || '')) {
+        return;
+    }
+    await dispatchUiAction(tab, 'hotkey_toggle_ui');
+}
+
+async function dispatchUiAction(tab, action) {
+    // Fast path: content script is already running in the tab.
+    try {
+        if (action === 'open_ui') {
+            await openUi(tab.id, 1);
+        } else {
+            await toggleUi(tab.id, 1);
+        }
+        return;
+    } catch (firstError) {
+        // Slow path: inject script and retry action.
+    }
+
+    await injectContentScript(tab);
+    if (action === 'open_ui') {
+        await openUi(tab.id);
+    } else {
+        await toggleUi(tab.id);
+    }
+}
 
 async function injectContentScript(tab) {
     try {
@@ -35,45 +134,8 @@ async function injectContentScript(tab) {
             target: { tabId: tab.id },
             files: ['content.js']
         });
-        injectedTabs.add(tab.id);
     } catch (err) {
         console.error('Injection failed:', err);
+        throw err;
     }
 }
-
-// Clean up closed tabs from the set
-chrome.tabs.onRemoved.addListener((tabId) => {
-    injectedTabs.delete(tabId);
-});
-
-// Listen for messages
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.action === 'capture_tab') {
-        // Only capture the visible area of the active tab
-        const format = request.format || 'jpeg';
-        const quality = request.quality || 60; // Default to 60% quality for tokens
-
-        chrome.tabs.captureVisibleTab(
-            sender.tab.windowId,
-            { format: format, quality: quality },
-            (dataUrl) => {
-                if (chrome.runtime.lastError) {
-                    console.error(chrome.runtime.lastError);
-                    sendResponse({ error: chrome.runtime.lastError.message });
-                } else {
-                    sendResponse({ dataUrl });
-                }
-            }
-        );
-        return true; // Keep channel open for async response
-    }
-
-    if (request.action === 'download_blob') {
-        chrome.downloads.download({
-            url: request.url,
-            filename: request.filename
-        }, (downloadId) => {
-            // Optional: Save to recent captures logic (can be reimplemented or simplified)
-        });
-    }
-});
