@@ -9,6 +9,16 @@ const ALLOWED_API_ORIGINS = new Set([
     'http://127.0.0.1:3000',
     'https://screenchat-backend-production.up.railway.app'
 ]);
+const HOTKEY_DEBUG_ENABLED = true;
+let hotkeyRequestCounter = 0;
+
+function hotkeyLog(event, details = {}) {
+    if (!HOTKEY_DEBUG_ENABLED) return;
+    console.log('[ScreenChat][Hotkey][Background]', event, {
+        ts: new Date().toISOString(),
+        ...details
+    });
+}
 
 function isAllowedApiRequestUrl(rawUrl = '') {
     try {
@@ -211,33 +221,45 @@ function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-const HOTKEY_COMMAND_DEDUPE_MS = 1000;
-const lastHotkeyCommandByTab = new Map();
-
-function shouldSuppressDuplicateHotkey(tabId) {
-    if (!Number.isInteger(tabId)) return false;
-    const now = Date.now();
-    const previous = lastHotkeyCommandByTab.get(tabId) || 0;
-    lastHotkeyCommandByTab.set(tabId, now);
-    return (now - previous) < HOTKEY_COMMAND_DEDUPE_MS;
+async function openUi(tabId, attempts = 3, payload = {}) {
+    return sendUiAction(tabId, 'open_ui', attempts, payload);
 }
 
-async function openUi(tabId, attempts = 3) {
-    return sendUiAction(tabId, 'open_ui', attempts);
+async function toggleUi(tabId, attempts = 3, payload = {}) {
+    return sendUiAction(tabId, 'hotkey_toggle_ui', attempts, payload);
 }
 
-async function toggleUi(tabId, attempts = 3) {
-    return sendUiAction(tabId, 'hotkey_toggle_ui', attempts);
-}
-
-async function sendUiAction(tabId, action, attempts = 3) {
+async function sendUiAction(tabId, action, attempts = 3, payload = {}) {
     let lastError = null;
     for (let i = 0; i < attempts; i += 1) {
+        const attempt = i + 1;
         try {
-            await chrome.tabs.sendMessage(tabId, { action });
+            hotkeyLog('send_ui_action_attempt', {
+                tabId,
+                action,
+                attempt,
+                attempts,
+                hotkeyRequestId: payload.hotkeyRequestId || null
+            });
+            await chrome.tabs.sendMessage(tabId, { action, ...payload });
+            hotkeyLog('send_ui_action_success', {
+                tabId,
+                action,
+                attempt,
+                attempts,
+                hotkeyRequestId: payload.hotkeyRequestId || null
+            });
             return;
         } catch (e) {
             lastError = e;
+            hotkeyLog('send_ui_action_error', {
+                tabId,
+                action,
+                attempt,
+                attempts,
+                hotkeyRequestId: payload.hotkeyRequestId || null,
+                error: e?.message || String(e)
+            });
             if (i === attempts - 1) break;
             await sleep(80);
         }
@@ -272,51 +294,99 @@ chrome.action.onClicked.addListener((tab) => {
 
 chrome.commands.onCommand.addListener((command) => {
     if (command !== 'toggle-screenchat') return;
+    hotkeyLog('command_received', { command });
 
     defer(async () => {
         try {
             const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-            if (!activeTab) return;
+            if (!activeTab) {
+                hotkeyLog('command_no_active_tab');
+                return;
+            }
+            hotkeyLog('command_active_tab', {
+                tabId: activeTab.id,
+                url: activeTab.url || null
+            });
             await toggleScreenChatWithHotkey(activeTab);
         } catch (err) {
             console.error('ScreenChat hotkey command failed:', err);
+            hotkeyLog('command_failed', { error: err?.message || String(err) });
         }
     });
 });
 
 async function toggleScreenChatWithHotkey(tab) {
     if (!tab?.id || isRestrictedUrl(tab.url || '')) {
+        hotkeyLog('hotkey_toggle_skipped_restricted', {
+            tabId: tab?.id || null,
+            url: tab?.url || null
+        });
         return;
     }
-    if (shouldSuppressDuplicateHotkey(tab.id)) {
-        return;
-    }
-    await dispatchUiAction(tab, 'hotkey_toggle_ui');
+
+    const hotkeyRequestId = `hk-${Date.now()}-${++hotkeyRequestCounter}`;
+    const hotkeyIssuedAt = Date.now();
+    hotkeyLog('hotkey_toggle_dispatch_start', {
+        tabId: tab.id,
+        url: tab.url || null,
+        hotkeyRequestId
+    });
+    await dispatchUiAction(tab, 'hotkey_toggle_ui', { hotkeyRequestId, hotkeyIssuedAt });
+    hotkeyLog('hotkey_toggle_dispatch_done', {
+        tabId: tab.id,
+        hotkeyRequestId
+    });
 }
 
-async function dispatchUiAction(tab, action) {
+async function dispatchUiAction(tab, action, payload = {}) {
+    hotkeyLog('dispatch_ui_action_start', {
+        tabId: tab.id,
+        action,
+        hotkeyRequestId: payload.hotkeyRequestId || null
+    });
     // Fast path: content script is already running in the tab.
     try {
         if (action === 'open_ui') {
-            await openUi(tab.id, 1);
+            await openUi(tab.id, 1, payload);
         } else {
-            await toggleUi(tab.id, 1);
+            await toggleUi(tab.id, 1, payload);
         }
+        hotkeyLog('dispatch_ui_action_fast_path_ok', {
+            tabId: tab.id,
+            action,
+            hotkeyRequestId: payload.hotkeyRequestId || null
+        });
         return;
     } catch (firstError) {
-        // Slow path: inject script and retry action.
+        hotkeyLog('dispatch_ui_action_fast_path_failed', {
+            tabId: tab.id,
+            action,
+            hotkeyRequestId: payload.hotkeyRequestId || null,
+            error: firstError?.message || String(firstError)
+        });
     }
 
     await injectContentScript(tab);
+    hotkeyLog('dispatch_ui_action_after_inject', {
+        tabId: tab.id,
+        action,
+        hotkeyRequestId: payload.hotkeyRequestId || null
+    });
     if (action === 'open_ui') {
-        await openUi(tab.id);
+        await openUi(tab.id, 3, payload);
     } else {
-        await toggleUi(tab.id);
+        await toggleUi(tab.id, 3, payload);
     }
+    hotkeyLog('dispatch_ui_action_done', {
+        tabId: tab.id,
+        action,
+        hotkeyRequestId: payload.hotkeyRequestId || null
+    });
 }
 
 async function injectContentScript(tab) {
     try {
+        hotkeyLog('inject_content_script_start', { tabId: tab.id });
         await chrome.scripting.insertCSS({
             target: { tabId: tab.id },
             files: ['content.css']
@@ -325,8 +395,13 @@ async function injectContentScript(tab) {
             target: { tabId: tab.id },
             files: ['content.js']
         });
+        hotkeyLog('inject_content_script_done', { tabId: tab.id });
     } catch (err) {
         console.error('Injection failed:', err);
+        hotkeyLog('inject_content_script_failed', {
+            tabId: tab.id,
+            error: err?.message || String(err)
+        });
         throw err;
     }
 }

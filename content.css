@@ -292,11 +292,6 @@
     gap: 5px;
 }
 
-.sc-profile-anchor {
-    position: relative;
-    display: inline-flex;
-}
-
 .sc-tabbar {
     border: 1px solid var(--sc-border-soft);
     background: var(--sc-bg-base);
@@ -387,11 +382,11 @@
 }
 
 .sc-profile-nudge {
-    position: absolute;
-    left: 50%;
-    bottom: calc(100% + 10px);
-    transform: translate(-50%, 5px);
-    width: min(220px, calc(100vw - 44px));
+    position: fixed;
+    left: 0;
+    top: 0;
+    transform: translateY(calc(-100% + 5px));
+    width: min(260px, calc(100vw - 24px));
     background: #ffffff;
     border: 1px solid #e2e6ea;
     border-radius: 12px;
@@ -407,7 +402,7 @@
 .sc-profile-nudge::after {
     content: '';
     position: absolute;
-    left: 50%;
+    left: var(--sc-profile-nudge-arrow-left, 50%);
     top: 100%;
     width: 10px;
     height: 10px;
@@ -421,7 +416,7 @@
     opacity: 1;
     visibility: visible;
     pointer-events: auto;
-    transform: translate(-50%, 0);
+    transform: translateY(-100%);
 }
 
 .sc-profile-nudge-title {
@@ -442,6 +437,7 @@
 .sc-profile-nudge-actions {
     display: flex;
     justify-content: flex-end;
+    flex-wrap: wrap;
     gap: 10px;
 }
 

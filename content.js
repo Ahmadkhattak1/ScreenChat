@@ -934,19 +934,30 @@
     let uiState = { ...DEFAULT_UI_STATE };
     let hasTypedWelcome = false;
     let activePanelInteraction = null;
-    // The same physical shortcut can arrive via page keydown and runtime message; dedupe them aggressively.
+    const HOTKEY_DEBUG_ENABLED = true;
     const HOTKEY_REPEAT_GUARD_MS = 220;
-    const HOTKEY_CROSS_SOURCE_GUARD_MS = 900;
-    const HOTKEY_CLOSE_AFTER_OPEN_GUARD_MS = 1400;
+    const HOTKEY_CROSS_SOURCE_GUARD_MS = 700;
+    const HOTKEY_PAGE_FALLBACK_DELAY_MS = 340;
     let lastHotkeyToggleAt = 0;
     let lastHotkeyToggleSource = '';
-    let lastHotkeyOpenedAt = 0;
+    let pendingPageHotkeyTimer = null;
     let uiStateHydrated = false;
     let pendingUiAction = null;
     let shadowStylesLoaded = false;
     let profileNudgeOptOut = false;
     let profileNudgeSkippedThisSession = false;
     let profileLoadAttempted = false;
+
+    function hotkeyLog(event, details = {}) {
+        if (!HOTKEY_DEBUG_ENABLED) return;
+        console.log('[ScreenChat][Hotkey][Content]', event, {
+            ts: new Date().toISOString(),
+            href: window.location.href,
+            mode: uiState?.mode || 'unknown',
+            hydrated: uiStateHydrated,
+            ...details
+        });
+    }
 
     function clamp(value, min, max) {
         return Math.min(max, Math.max(min, value));
@@ -1167,6 +1178,11 @@
                 }
             }
         }
+
+        const profileNudge = shadowRoot.getElementById('sc-profile-nudge');
+        if (profileNudge?.classList.contains('visible')) {
+            positionProfileNudge();
+        }
     }
 
     function setActivePane(pane = 'chat', persist = true) {
@@ -1196,8 +1212,12 @@
     }
 
     function setUiMode(mode, persist = true) {
+        const previousMode = uiState.mode;
         const targetMode = ['open', 'hidden'].includes(mode) ? mode : 'open';
         uiState.mode = targetMode;
+        if (previousMode !== targetMode) {
+            hotkeyLog('ui_mode_changed', { from: previousMode, to: targetMode, persist });
+        }
         if (container) {
             container.setAttribute('data-mode', targetMode);
         }
@@ -1495,11 +1515,27 @@
         const now = Date.now();
         const elapsed = now - lastHotkeyToggleAt;
         const sameSource = source === lastHotkeyToggleSource;
-        if (sameSource && elapsed < HOTKEY_REPEAT_GUARD_MS) return;
-        if (!sameSource && elapsed < HOTKEY_CROSS_SOURCE_GUARD_MS) return;
+        if (sameSource && elapsed < HOTKEY_REPEAT_GUARD_MS) {
+            hotkeyLog('trigger_blocked_repeat', {
+                source,
+                elapsed,
+                threshold: HOTKEY_REPEAT_GUARD_MS
+            });
+            return;
+        }
+        if (!sameSource && elapsed < HOTKEY_CROSS_SOURCE_GUARD_MS) {
+            hotkeyLog('trigger_blocked_cross_source', {
+                source,
+                previousSource: lastHotkeyToggleSource,
+                elapsed,
+                threshold: HOTKEY_CROSS_SOURCE_GUARD_MS
+            });
+            return;
+        }
 
         lastHotkeyToggleAt = now;
         lastHotkeyToggleSource = source;
+        hotkeyLog('trigger_accepted', { source, elapsed, sameSource });
         toggleUIFromHotkey();
     }
 
@@ -1513,7 +1549,27 @@
 
         event.preventDefault();
         event.stopPropagation();
-        handleUiAction('hotkey_toggle_ui', 'page_keydown');
+        hotkeyLog('page_keydown_detected', {
+            key: event.key,
+            code: event.code,
+            ctrlKey: !!event.ctrlKey,
+            metaKey: !!event.metaKey,
+            shiftKey: !!event.shiftKey,
+            altKey: !!event.altKey
+        });
+
+        if (pendingPageHotkeyTimer) {
+            clearTimeout(pendingPageHotkeyTimer);
+            pendingPageHotkeyTimer = null;
+            hotkeyLog('page_fallback_rescheduled');
+        }
+
+        pendingPageHotkeyTimer = setTimeout(() => {
+            pendingPageHotkeyTimer = null;
+            hotkeyLog('page_fallback_fired');
+            handleUiAction('hotkey_toggle_ui', 'page_keydown_fallback');
+        }, HOTKEY_PAGE_FALLBACK_DELAY_MS);
+        hotkeyLog('page_fallback_scheduled', { delayMs: HOTKEY_PAGE_FALLBACK_DELAY_MS });
     }
 
     function renderHotkeyHint() {
@@ -1536,6 +1592,7 @@
     }
 
     function runUiAction(action, source = 'runtime_message') {
+        hotkeyLog('run_ui_action', { action, source });
         if (action === 'toggle_ui') {
             toggleUI();
         } else if (action === 'open_ui') {
@@ -1546,10 +1603,19 @@
     }
 
     function handleUiAction(action, source = 'runtime_message') {
+        if (action === 'hotkey_toggle_ui' && source === 'runtime_message' && pendingPageHotkeyTimer) {
+            clearTimeout(pendingPageHotkeyTimer);
+            pendingPageHotkeyTimer = null;
+            hotkeyLog('page_fallback_cancelled_by_runtime');
+        }
+
         if (!uiStateHydrated) {
             pendingUiAction = { action, source };
+            hotkeyLog('action_queued_until_hydrated', { action, source });
             return;
         }
+
+        hotkeyLog('action_run', { action, source });
         runUiAction(action, source);
     }
 
@@ -1635,6 +1701,30 @@
         refreshProfileNudgeVisibility();
     }
 
+    function positionProfileNudge() {
+        const nudge = shadowRoot?.getElementById('sc-profile-nudge');
+        const profileBtn = shadowRoot?.getElementById('sc-profile-btn');
+        if (!nudge || !profileBtn) return;
+
+        const buttonRect = profileBtn.getBoundingClientRect();
+        const nudgeWidth = nudge.offsetWidth || 244;
+        const viewportPadding = 10;
+        const arrowEdgePadding = 16;
+        const top = buttonRect.top - 10;
+        let left = buttonRect.left + (buttonRect.width / 2) - (nudgeWidth / 2);
+        left = clamp(left, viewportPadding, window.innerWidth - nudgeWidth - viewportPadding);
+
+        const arrowLeft = clamp(
+            buttonRect.left + (buttonRect.width / 2) - left,
+            arrowEdgePadding,
+            nudgeWidth - arrowEdgePadding
+        );
+
+        nudge.style.left = `${Math.round(left)}px`;
+        nudge.style.top = `${Math.round(top)}px`;
+        nudge.style.setProperty('--sc-profile-nudge-arrow-left', `${Math.round(arrowLeft)}px`);
+    }
+
     function setProfileNudgeVisible(visible) {
         const nudge = shadowRoot?.getElementById('sc-profile-nudge');
         const profileBtn = shadowRoot?.getElementById('sc-profile-btn');
@@ -1644,6 +1734,10 @@
         nudge.setAttribute('aria-hidden', shouldShow ? 'false' : 'true');
         if (profileBtn) {
             profileBtn.classList.toggle('sc-btn-icon-nudged', shouldShow);
+        }
+        if (shouldShow) {
+            positionProfileNudge();
+            requestAnimationFrame(positionProfileNudge);
         }
     }
 
@@ -1810,6 +1904,11 @@
 
         chrome.runtime.onMessage.addListener((request) => {
             if (request.action === 'toggle_ui' || request.action === 'open_ui' || request.action === 'hotkey_toggle_ui') {
+                hotkeyLog('runtime_message_received', {
+                    action: request.action,
+                    hotkeyRequestId: request.hotkeyRequestId || null,
+                    hotkeyIssuedAt: request.hotkeyIssuedAt || null
+                });
                 handleUiAction(request.action, 'runtime_message');
             }
         });
@@ -1823,12 +1922,27 @@
 
         migrateAndLoadUiState(() => {
             uiStateHydrated = true;
+            hotkeyLog('ui_state_hydrated', {
+                pendingUiAction: pendingUiAction
+                    ? (typeof pendingUiAction === 'string'
+                        ? pendingUiAction
+                        : `${pendingUiAction.action}:${pendingUiAction.source}`)
+                    : null
+            });
             if (pendingUiAction) {
                 const pendingAction = pendingUiAction;
                 pendingUiAction = null;
                 if (typeof pendingAction === 'string') {
+                    hotkeyLog('replaying_pending_action', {
+                        action: pendingAction,
+                        source: 'runtime_message'
+                    });
                     runUiAction(pendingAction, 'runtime_message');
                 } else {
+                    hotkeyLog('replaying_pending_action', {
+                        action: pendingAction.action,
+                        source: pendingAction.source || 'runtime_message'
+                    });
                     runUiAction(pendingAction.action, pendingAction.source || 'runtime_message');
                 }
             }
@@ -1908,22 +2022,12 @@
                                     <path d="M3 4v4h4M12 7v5l3 2" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
                                 </svg>
                             </button>
-                            <div class="sc-profile-anchor">
-                                <button class="sc-btn-icon" id="sc-profile-btn" title="Profile" aria-label="Profile">
-                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                                        <circle cx="12" cy="8" r="3.4" stroke="currentColor" stroke-width="1.9"/>
-                                        <path d="M5.5 19.2c1.55-2.56 3.9-3.84 6.5-3.84s4.95 1.28 6.5 3.84" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
-                                    </svg>
-                                </button>
-                                <div class="sc-profile-nudge" id="sc-profile-nudge" role="note" aria-hidden="true">
-                                    <p class="sc-profile-nudge-title">Personalize ScreenChat</p>
-                                    <p class="sc-profile-nudge-copy">Add a few details so I can help you.</p>
-                                    <div class="sc-profile-nudge-actions">
-                                        <button class="sc-profile-nudge-btn" id="sc-profile-nudge-skip" type="button">Skip for now</button>
-                                        <button class="sc-profile-nudge-btn" id="sc-profile-nudge-stop" type="button">Don&apos;t ask again</button>
-                                    </div>
-                                </div>
-                            </div>
+                            <button class="sc-btn-icon" id="sc-profile-btn" title="Profile" aria-label="Profile">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                    <circle cx="12" cy="8" r="3.4" stroke="currentColor" stroke-width="1.9"/>
+                                    <path d="M5.5 19.2c1.55-2.56 3.9-3.84 6.5-3.84s4.95 1.28 6.5 3.84" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
+                                </svg>
+                            </button>
                             <button class="sc-btn-icon sc-btn-new" id="sc-new-chat" title="New Chat" aria-label="Start new chat">
                                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                                     <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
@@ -2039,6 +2143,14 @@
                 <div class="sc-resize-handle sc-resize-handle-se" data-direction="se" aria-hidden="true"></div>
                 <div class="sc-resize-handle sc-resize-handle-sw" data-direction="sw" aria-hidden="true"></div>
             </section>
+            <div class="sc-profile-nudge" id="sc-profile-nudge" role="note" aria-hidden="true">
+                <p class="sc-profile-nudge-title">Personalize ScreenChat</p>
+                <p class="sc-profile-nudge-copy">Add a few details so I can help you.</p>
+                <div class="sc-profile-nudge-actions">
+                    <button class="sc-profile-nudge-btn" id="sc-profile-nudge-skip" type="button">Skip for now</button>
+                    <button class="sc-profile-nudge-btn" id="sc-profile-nudge-stop" type="button">Don&apos;t ask again</button>
+                </div>
+            </div>
         `;
 
         container.setAttribute('data-mode', uiState.mode);
@@ -2538,15 +2650,12 @@
 
     function toggleUIFromHotkey() {
         if (!container) return;
-        const now = Date.now();
         if (uiState.mode === 'open') {
-            if (now - lastHotkeyOpenedAt < HOTKEY_CLOSE_AFTER_OPEN_GUARD_MS) {
-                return;
-            }
+            hotkeyLog('toggle_hotkey_close');
             setUiMode('hidden');
             return;
         }
-        lastHotkeyOpenedAt = now;
+        hotkeyLog('toggle_hotkey_open');
         openUiFromActivation();
     }
     // --- Timing helper ---
