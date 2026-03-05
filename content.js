@@ -910,6 +910,7 @@
     const UI_STATE_KEY = 'sc_ui_v2';
     const LEGACY_UI_STATE_KEYS = ['sc_ui_width', 'sc_ui_height', 'sc_ui_position'];
     const ATTACH_SCREEN_KEY = 'sc_attach_screen_enabled';
+    const PROFILE_NUDGE_OPT_OUT_KEY = 'sc_profile_nudge_opt_out';
     const ATTACH_GLOW_OVERLAY_ID = 'sc-attach-glow-overlay';
     const DEFAULT_PANEL_WIDTH = 372;
     const DEFAULT_PANEL_HEIGHT = 590;
@@ -933,10 +934,19 @@
     let uiState = { ...DEFAULT_UI_STATE };
     let hasTypedWelcome = false;
     let activePanelInteraction = null;
+    // The same physical shortcut can arrive via page keydown and runtime message; dedupe them aggressively.
+    const HOTKEY_REPEAT_GUARD_MS = 220;
+    const HOTKEY_CROSS_SOURCE_GUARD_MS = 900;
+    const HOTKEY_CLOSE_AFTER_OPEN_GUARD_MS = 1400;
     let lastHotkeyToggleAt = 0;
+    let lastHotkeyToggleSource = '';
+    let lastHotkeyOpenedAt = 0;
     let uiStateHydrated = false;
     let pendingUiAction = null;
     let shadowStylesLoaded = false;
+    let profileNudgeOptOut = false;
+    let profileNudgeSkippedThisSession = false;
+    let profileLoadAttempted = false;
 
     function clamp(value, min, max) {
         return Math.min(max, Math.max(min, value));
@@ -1181,6 +1191,7 @@
         if (profileTab) profileTab.classList.toggle('active', targetPane === 'profile');
 
         uiState.activePane = targetPane;
+        refreshProfileNudgeVisibility();
         if (persist) persistUiState();
     }
 
@@ -1194,6 +1205,7 @@
         if (targetMode === 'open') {
             setActivePane(uiState.activePane || 'chat', false);
         }
+        refreshProfileNudgeVisibility();
         if (persist) persistUiState();
     }
 
@@ -1239,7 +1251,7 @@
             if (interactionType === 'move' && !uiState.movable) return;
             if (interactionType === 'resize' && (!uiState.resizable || !direction)) return;
 
-            const nonDragTarget = event.target.closest('button, a, input, textarea, select, [role="button"], [contenteditable="true"]');
+            const nonDragTarget = event.target.closest('button, a, input, textarea, select, [role="button"], [contenteditable="true"], .sc-profile-nudge');
             if (interactionType === 'move' && nonDragTarget) return;
 
             event.preventDefault();
@@ -1479,10 +1491,15 @@
         return event.ctrlKey && !event.metaKey;
     }
 
-    function triggerHotkeyToggle() {
+    function triggerHotkeyToggle(source = 'runtime_message') {
         const now = Date.now();
-        if (now - lastHotkeyToggleAt < 160) return;
+        const elapsed = now - lastHotkeyToggleAt;
+        const sameSource = source === lastHotkeyToggleSource;
+        if (sameSource && elapsed < HOTKEY_REPEAT_GUARD_MS) return;
+        if (!sameSource && elapsed < HOTKEY_CROSS_SOURCE_GUARD_MS) return;
+
         lastHotkeyToggleAt = now;
+        lastHotkeyToggleSource = source;
         toggleUIFromHotkey();
     }
 
@@ -1496,7 +1513,7 @@
 
         event.preventDefault();
         event.stopPropagation();
-        triggerHotkeyToggle();
+        handleUiAction('hotkey_toggle_ui', 'page_keydown');
     }
 
     function renderHotkeyHint() {
@@ -1518,22 +1535,22 @@
         setActivePane('chat', false);
     }
 
-    function runUiAction(action) {
+    function runUiAction(action, source = 'runtime_message') {
         if (action === 'toggle_ui') {
             toggleUI();
         } else if (action === 'open_ui') {
             openUiFromActivation();
         } else if (action === 'hotkey_toggle_ui') {
-            triggerHotkeyToggle();
+            triggerHotkeyToggle(source);
         }
     }
 
-    function handleUiAction(action) {
+    function handleUiAction(action, source = 'runtime_message') {
         if (!uiStateHydrated) {
-            pendingUiAction = action;
+            pendingUiAction = { action, source };
             return;
         }
-        runUiAction(action);
+        runUiAction(action, source);
     }
 
     function syncQuickPromptsVisibility() {
@@ -1606,6 +1623,41 @@
             : 'Detached: messages use text/context only';
     }
 
+    function hasAnyProfileValue(profile) {
+        if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return false;
+        const values = [profile.fullName, profile.nickname, profile.email, profile.phone, profile.notes];
+        return values.some((value) => typeof value === 'string' && value.trim().length > 0);
+    }
+
+    function setProfileNudgeOptOut(enabled) {
+        profileNudgeOptOut = !!enabled;
+        chrome.storage.local.set({ [PROFILE_NUDGE_OPT_OUT_KEY]: profileNudgeOptOut });
+        refreshProfileNudgeVisibility();
+    }
+
+    function setProfileNudgeVisible(visible) {
+        const nudge = shadowRoot?.getElementById('sc-profile-nudge');
+        const profileBtn = shadowRoot?.getElementById('sc-profile-btn');
+        if (!nudge) return;
+        const shouldShow = !!visible;
+        nudge.classList.toggle('visible', shouldShow);
+        nudge.setAttribute('aria-hidden', shouldShow ? 'false' : 'true');
+        if (profileBtn) {
+            profileBtn.classList.toggle('sc-btn-icon-nudged', shouldShow);
+        }
+    }
+
+    function shouldShowProfileNudge() {
+        if (!profileLoadAttempted) return false;
+        if (profileNudgeOptOut || profileNudgeSkippedThisSession) return false;
+        if (uiState.mode !== 'open' || uiState.activePane !== 'chat') return false;
+        return !hasAnyProfileValue(userProfile);
+    }
+
+    function refreshProfileNudgeVisibility() {
+        setProfileNudgeVisible(shouldShowProfileNudge());
+    }
+
     function ensureAttachGlowOverlay() {
         let overlay = shadowRoot?.getElementById(ATTACH_GLOW_OVERLAY_ID);
         if (overlay) return overlay;
@@ -1651,36 +1703,79 @@
         }
     }
 
-    function captureCurrentScreen() {
-        return new Promise((resolve, reject) => {
-            const previousVisibility = container?.style.visibility || '';
-            if (container) {
-                container.style.visibility = 'hidden';
-            }
+    function isVisibleForCapture(el) {
+        if (!(el instanceof Element)) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    }
 
-            const finalize = (handler) => (value) => {
-                if (container) {
-                    container.style.visibility = previousVisibility;
+    function hasVisibleScreenChatUiForCapture() {
+        const panel = shadowRoot?.getElementById('sc-panel');
+        const launcher = shadowRoot?.getElementById('sc-launcher');
+        return (panel && isVisibleForCapture(panel)) || (launcher && isVisibleForCapture(launcher));
+    }
+
+    function waitForPaint(frames = 1) {
+        const frameCount = Math.max(1, Number(frames) || 1);
+        return new Promise((resolve) => {
+            let remaining = frameCount;
+            const tick = () => {
+                remaining -= 1;
+                if (remaining <= 0) {
+                    resolve();
+                    return;
                 }
-                handler(value);
+                requestAnimationFrame(tick);
             };
-
-            try {
-                requestAnimationFrame(() => {
-                    chrome.runtime.sendMessage({ action: 'capture_visible_tab' }, (response) => {
-                        if (chrome.runtime.lastError) {
-                            return finalize(reject)(new Error(chrome.runtime.lastError.message || 'Failed to capture screen'));
-                        }
-                        if (!response?.ok || typeof response.image !== 'string' || !response.image) {
-                            return finalize(reject)(new Error(response?.error || 'Failed to capture screen'));
-                        }
-                        finalize(resolve)(response.image);
-                    });
-                });
-            } catch (error) {
-                finalize(reject)(error);
-            }
+            requestAnimationFrame(tick);
         });
+    }
+
+    function captureVisibleTabImage() {
+        return new Promise((resolve, reject) => {
+            chrome.runtime.sendMessage({ action: 'capture_visible_tab' }, (response) => {
+                if (chrome.runtime.lastError) {
+                    reject(new Error(chrome.runtime.lastError.message || 'Failed to capture screen'));
+                    return;
+                }
+                if (!response?.ok || typeof response.image !== 'string' || !response.image) {
+                    reject(new Error(response?.error || 'Failed to capture screen'));
+                    return;
+                }
+                resolve(response.image);
+            });
+        });
+    }
+
+    async function captureCurrentScreen() {
+        const host = document.getElementById('screenchat-host');
+        const shouldMoveHostOffscreen = !!host && hasVisibleScreenChatUiForCapture();
+
+        if (!shouldMoveHostOffscreen) {
+            return captureVisibleTabImage();
+        }
+
+        host.setAttribute('data-sc-capture-hidden', '1');
+        try {
+            // Wait for the hide state to paint before capture so the screenshot keeps underlying content.
+            await waitForPaint(2);
+            return await captureVisibleTabImage();
+        } finally {
+            host.removeAttribute('data-sc-capture-hidden');
+            await waitForPaint(1);
+        }
+    }
+
+    function isCapturePermissionError(error) {
+        const message = String(error?.message || '').toLowerCase();
+        return (
+            message.includes('permission') ||
+            message.includes('denied') ||
+            message.includes('not allowed') ||
+            message.includes('not permitted')
+        );
     }
 
     // Initialize
@@ -1715,7 +1810,7 @@
 
         chrome.runtime.onMessage.addListener((request) => {
             if (request.action === 'toggle_ui' || request.action === 'open_ui' || request.action === 'hotkey_toggle_ui') {
-                handleUiAction(request.action);
+                handleUiAction(request.action, 'runtime_message');
             }
         });
 
@@ -1729,14 +1824,19 @@
         migrateAndLoadUiState(() => {
             uiStateHydrated = true;
             if (pendingUiAction) {
-                const action = pendingUiAction;
+                const pendingAction = pendingUiAction;
                 pendingUiAction = null;
-                runUiAction(action);
+                if (typeof pendingAction === 'string') {
+                    runUiAction(pendingAction, 'runtime_message');
+                } else {
+                    runUiAction(pendingAction.action, pendingAction.source || 'runtime_message');
+                }
             }
         });
 
-        chrome.storage.local.get(['screenchat_user', 'conversationHistory', 'messageCount', 'sessionDomain', ATTACH_SCREEN_KEY], (result) => {
+        chrome.storage.local.get(['screenchat_user', 'conversationHistory', 'messageCount', 'sessionDomain', ATTACH_SCREEN_KEY, PROFILE_NUDGE_OPT_OUT_KEY], (result) => {
             const currentDomain = window.location.hostname;
+            profileNudgeOptOut = !!result[PROFILE_NUDGE_OPT_OUT_KEY];
             if (typeof result[ATTACH_SCREEN_KEY] === 'boolean') {
                 setAttachScreenEnabled(result[ATTACH_SCREEN_KEY], false);
             } else {
@@ -1777,6 +1877,7 @@
                 }
             }
             syncQuickPromptsVisibility();
+            refreshProfileNudgeVisibility();
         });
     }
 
@@ -1807,12 +1908,22 @@
                                     <path d="M3 4v4h4M12 7v5l3 2" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
                                 </svg>
                             </button>
-                            <button class="sc-btn-icon" id="sc-profile-btn" title="Profile" aria-label="Profile">
-                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                                    <circle cx="12" cy="8" r="3.4" stroke="currentColor" stroke-width="1.9"/>
-                                    <path d="M5.5 19.2c1.55-2.56 3.9-3.84 6.5-3.84s4.95 1.28 6.5 3.84" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
-                                </svg>
-                            </button>
+                            <div class="sc-profile-anchor">
+                                <button class="sc-btn-icon" id="sc-profile-btn" title="Profile" aria-label="Profile">
+                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                        <circle cx="12" cy="8" r="3.4" stroke="currentColor" stroke-width="1.9"/>
+                                        <path d="M5.5 19.2c1.55-2.56 3.9-3.84 6.5-3.84s4.95 1.28 6.5 3.84" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
+                                    </svg>
+                                </button>
+                                <div class="sc-profile-nudge" id="sc-profile-nudge" role="note" aria-hidden="true">
+                                    <p class="sc-profile-nudge-title">Personalize ScreenChat</p>
+                                    <p class="sc-profile-nudge-copy">Add a few details so I can help you.</p>
+                                    <div class="sc-profile-nudge-actions">
+                                        <button class="sc-profile-nudge-btn" id="sc-profile-nudge-skip" type="button">Skip for now</button>
+                                        <button class="sc-profile-nudge-btn" id="sc-profile-nudge-stop" type="button">Don&apos;t ask again</button>
+                                    </div>
+                                </div>
+                            </div>
                             <button class="sc-btn-icon sc-btn-new" id="sc-new-chat" title="New Chat" aria-label="Start new chat">
                                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                                     <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
@@ -1959,6 +2070,8 @@
         const profileEmailInput = shadowRoot.getElementById('sc-profile-email');
         const profilePhoneInput = shadowRoot.getElementById('sc-profile-phone');
         const profileNotesInput = shadowRoot.getElementById('sc-profile-notes');
+        const profileNudgeSkipBtn = shadowRoot.getElementById('sc-profile-nudge-skip');
+        const profileNudgeStopBtn = shadowRoot.getElementById('sc-profile-nudge-stop');
 
         const quickPromptButtons = shadowRoot.querySelectorAll('.sc-prompt-btn');
         setupPanelPointerInteractions();
@@ -1993,25 +2106,56 @@
         }
 
         if (historyBtn) historyBtn.addEventListener('click', () => openPane('history'));
-        if (profileBtn) profileBtn.addEventListener('click', () => openPane('profile'));
+        if (profileBtn) {
+            profileBtn.addEventListener('click', () => {
+                profileNudgeSkippedThisSession = true;
+                refreshProfileNudgeVisibility();
+                openPane('profile');
+            });
+        }
 
         if (historyCloseBtn) historyCloseBtn.addEventListener('click', () => openPane('chat'));
         if (profileCloseBtn) profileCloseBtn.addEventListener('click', () => openPane('chat'));
+
+        if (profileNudgeSkipBtn) {
+            profileNudgeSkipBtn.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                profileNudgeSkippedThisSession = true;
+                refreshProfileNudgeVisibility();
+            });
+        }
+
+        if (profileNudgeStopBtn) {
+            profileNudgeStopBtn.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                setProfileNudgeOptOut(true);
+            });
+        }
 
         async function loadProfile() {
             try {
                 const response = await apiFetch(`/api/profile?userId=${encodeURIComponent(userId)}`);
                 const data = await response.json();
-                if (data.profile) {
+                if (data.profile && typeof data.profile === 'object' && !Array.isArray(data.profile)) {
                     userProfile = data.profile;
                     if (profileNameInput) profileNameInput.value = data.profile.fullName || '';
                     if (profileNicknameInput) profileNicknameInput.value = data.profile.nickname || '';
                     if (profileEmailInput) profileEmailInput.value = data.profile.email || '';
                     if (profilePhoneInput) profilePhoneInput.value = data.profile.phone || '';
                     if (profileNotesInput) profileNotesInput.value = data.profile.notes || '';
+                    if (hasAnyProfileValue(data.profile)) {
+                        setProfileNudgeOptOut(true);
+                    }
+                } else {
+                    userProfile = null;
                 }
             } catch (e) {
                 console.error('[Profile] Load error:', e);
+            } finally {
+                profileLoadAttempted = true;
+                refreshProfileNudgeVisibility();
             }
         }
 
@@ -2039,6 +2183,9 @@
                     const data = await response.json();
                     if (data.success) {
                         userProfile = profile;
+                        if (hasAnyProfileValue(profile)) {
+                            setProfileNudgeOptOut(true);
+                        }
                         profileSaveBtn.textContent = 'Saved';
                         setTimeout(() => {
                             profileSaveBtn.textContent = 'Save Profile';
@@ -2207,12 +2354,18 @@
                     return msg;
                 });
                 sessionUrl = window.location.href || sessionUrl;
+                const activeTabUrl = sessionUrl;
 
                 let attachedImage = null;
-                try {
-                    attachedImage = await captureCurrentScreen();
-                } catch (captureError) {
-                    console.warn('[ScreenCapture] Capture failed:', captureError);
+                if (attachScreenEnabled) {
+                    try {
+                        attachedImage = await captureCurrentScreen();
+                    } catch (captureError) {
+                        console.warn('[ScreenCapture] Capture failed:', captureError);
+                        if (isCapturePermissionError(captureError)) {
+                            setAttachScreenEnabled(false, true);
+                        }
+                    }
                 }
 
                 currentAbortController = new AbortController();
@@ -2222,6 +2375,7 @@
                     userId,
                     sessionId,
                     sessionUrl,
+                    activeTabUrl,
                     mode: chatMode,
                     profile: userProfile,
                     image: attachedImage
@@ -2384,10 +2538,15 @@
 
     function toggleUIFromHotkey() {
         if (!container) return;
+        const now = Date.now();
         if (uiState.mode === 'open') {
+            if (now - lastHotkeyOpenedAt < HOTKEY_CLOSE_AFTER_OPEN_GUARD_MS) {
+                return;
+            }
             setUiMode('hidden');
             return;
         }
+        lastHotkeyOpenedAt = now;
         openUiFromActivation();
     }
     // --- Timing helper ---

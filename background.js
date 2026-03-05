@@ -211,6 +211,17 @@ function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const HOTKEY_COMMAND_DEDUPE_MS = 1000;
+const lastHotkeyCommandByTab = new Map();
+
+function shouldSuppressDuplicateHotkey(tabId) {
+    if (!Number.isInteger(tabId)) return false;
+    const now = Date.now();
+    const previous = lastHotkeyCommandByTab.get(tabId) || 0;
+    lastHotkeyCommandByTab.set(tabId, now);
+    return (now - previous) < HOTKEY_COMMAND_DEDUPE_MS;
+}
+
 async function openUi(tabId, attempts = 3) {
     return sendUiAction(tabId, 'open_ui', attempts);
 }
@@ -275,6 +286,9 @@ chrome.commands.onCommand.addListener((command) => {
 
 async function toggleScreenChatWithHotkey(tab) {
     if (!tab?.id || isRestrictedUrl(tab.url || '')) {
+        return;
+    }
+    if (shouldSuppressDuplicateHotkey(tab.id)) {
         return;
     }
     await dispatchUiAction(tab, 'hotkey_toggle_ui');
