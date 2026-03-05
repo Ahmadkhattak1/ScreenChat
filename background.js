@@ -4,17 +4,194 @@ chrome.runtime.onInstalled.addListener(() => {
     console.log('ScreenChat extension installed');
 });
 
+const ALLOWED_API_ORIGINS = new Set([
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+    'https://screenchat-backend-production.up.railway.app'
+]);
+
+function isAllowedApiRequestUrl(rawUrl = '') {
+    try {
+        const parsed = new URL(rawUrl);
+        return ALLOWED_API_ORIGINS.has(parsed.origin);
+    } catch {
+        return false;
+    }
+}
+
+function buildProxyRequestConfig(payload) {
+    const requestUrl = typeof payload?.url === 'string' ? payload.url.trim() : '';
+    if (!requestUrl || !isAllowedApiRequestUrl(requestUrl)) {
+        throw new Error('Blocked API request URL');
+    }
+
+    const sourceOptions = payload?.options && typeof payload.options === 'object' ? payload.options : {};
+    const method = typeof sourceOptions.method === 'string' ? sourceOptions.method : 'GET';
+    const headers = sourceOptions.headers && typeof sourceOptions.headers === 'object'
+        ? sourceOptions.headers
+        : undefined;
+    const body = typeof sourceOptions.body === 'string' ? sourceOptions.body : undefined;
+
+    return { requestUrl, method, headers, body };
+}
+
+async function proxyApiFetch(message) {
+    const { requestUrl, method, headers, body } = buildProxyRequestConfig(message);
+
+    const response = await fetch(requestUrl, { method, headers, body });
+    const bodyText = await response.text();
+    const responseHeaders = {};
+    response.headers.forEach((value, key) => {
+        responseHeaders[key] = value;
+    });
+
+    return {
+        ok: true,
+        status: response.status,
+        statusText: response.statusText,
+        headers: responseHeaders,
+        bodyText
+    };
+}
+
+async function proxyApiStream(port, payload, abortController) {
+    const { requestUrl, method, headers, body } = buildProxyRequestConfig(payload);
+    const response = await fetch(requestUrl, {
+        method,
+        headers,
+        body,
+        signal: abortController.signal
+    });
+
+    const responseHeaders = {};
+    response.headers.forEach((value, key) => {
+        responseHeaders[key] = value;
+    });
+
+    if (!response.ok) {
+        const bodyText = await response.text();
+        port.postMessage({
+            type: 'http_error',
+            status: response.status,
+            statusText: response.statusText,
+            headers: responseHeaders,
+            bodyText
+        });
+        return;
+    }
+
+    port.postMessage({
+        type: 'response_meta',
+        status: response.status,
+        statusText: response.statusText,
+        headers: responseHeaders
+    });
+
+    if (!response.body || typeof response.body.getReader !== 'function') {
+        const bodyText = await response.text();
+        if (bodyText) {
+            port.postMessage({ type: 'chunk', chunk: bodyText });
+        }
+        port.postMessage({ type: 'end' });
+        return;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        if (chunk) {
+            port.postMessage({ type: 'chunk', chunk });
+        }
+    }
+
+    const tail = decoder.decode();
+    if (tail) {
+        port.postMessage({ type: 'chunk', chunk: tail });
+    }
+    port.postMessage({ type: 'end' });
+}
+
+chrome.runtime.onConnect.addListener((port) => {
+    if (port.name !== 'proxy_api_stream') return;
+
+    let disconnected = false;
+    const abortController = new AbortController();
+
+    const onDisconnect = () => {
+        disconnected = true;
+        abortController.abort();
+    };
+
+    port.onDisconnect.addListener(onDisconnect);
+
+    port.onMessage.addListener((message) => {
+        const type = message?.type;
+        if (type === 'abort') {
+            abortController.abort();
+            return;
+        }
+        if (type !== 'start') return;
+
+        (async () => {
+            try {
+                await proxyApiStream(port, message, abortController);
+            } catch (error) {
+                if (disconnected || abortController.signal.aborted) {
+                    return;
+                }
+                port.postMessage({
+                    type: 'error',
+                    error: error?.message || 'Proxy API stream failed'
+                });
+            }
+        })();
+    });
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message?.action !== 'capture_visible_tab') return undefined;
+    const action = message?.action;
+    if (action !== 'capture_visible_tab' && action !== 'get_active_tab_url' && action !== 'proxy_api_fetch') return undefined;
 
     (async () => {
         try {
-            const windowId = sender?.tab?.windowId;
-            const image = await chrome.tabs.captureVisibleTab(windowId, { format: 'png' });
-            sendResponse({ ok: true, image });
+            if (action === 'capture_visible_tab') {
+                const windowId = sender?.tab?.windowId;
+                const image = await chrome.tabs.captureVisibleTab(windowId, { format: 'png' });
+                sendResponse({ ok: true, image });
+                return;
+            }
+
+            if (action === 'proxy_api_fetch') {
+                const result = await proxyApiFetch(message);
+                sendResponse(result);
+                return;
+            }
+
+            if (typeof sender?.tab?.url === 'string' && sender.tab.url.trim()) {
+                sendResponse({ ok: true, url: sender.tab.url });
+                return;
+            }
+
+            const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            sendResponse({ ok: true, url: activeTab?.url || null });
         } catch (error) {
-            console.error('Screen capture failed:', error);
-            sendResponse({ ok: false, error: 'Unable to capture current screen' });
+            if (action === 'capture_visible_tab') {
+                console.error('Screen capture failed:', error);
+                sendResponse({ ok: false, error: 'Unable to capture current screen' });
+                return;
+            }
+            if (action === 'proxy_api_fetch') {
+                console.warn('Proxy API fetch failed:', error);
+                sendResponse({ ok: false, error: error?.message || 'Proxy API fetch failed' });
+                return;
+            }
+
+            console.warn('Active tab URL lookup failed:', error);
+            sendResponse({ ok: false, url: sender?.tab?.url || null });
         }
     })();
 

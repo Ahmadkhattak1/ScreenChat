@@ -988,30 +988,61 @@
 }
 
 .sc-shimmer-text {
+    --sc-shimmer-duration: 1s;
+    --sc-shimmer-spread: 22px;
+    --sc-shimmer-base-color: #7a8189;
+    --sc-shimmer-highlight-color: #1f252a;
+    --sc-shimmer-bg: linear-gradient(
+        90deg,
+        transparent calc(50% - var(--sc-shimmer-spread)),
+        var(--sc-shimmer-highlight-color),
+        transparent calc(50% + var(--sc-shimmer-spread))
+    );
     position: relative;
     display: inline-block;
-    color: var(--sc-ink-500);
-    overflow: hidden;
+    color: transparent;
+    background-size: 250% 100%, auto;
+    background-repeat: no-repeat, padding-box;
+    background-clip: text;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-image: var(--sc-shimmer-bg), linear-gradient(var(--sc-shimmer-base-color), var(--sc-shimmer-base-color));
+    animation: sc-text-shimmer var(--sc-shimmer-duration) linear infinite;
+    will-change: background-position;
 }
 
-.sc-shimmer-text::after {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: -40%;
-    width: 34%;
-    height: 100%;
-    background: rgba(97, 152, 142, 0.28);
-    transform: skewX(-14deg);
-    animation: sc-sweep 1.5s var(--sc-ease) infinite;
+.sc-message.ai.loading-bubble .sc-shimmer-text {
+    --sc-shimmer-base-color: #7f868e;
+    --sc-shimmer-highlight-color: #20262b;
+    font-weight: 600;
+    letter-spacing: 0.01em;
 }
 
-@keyframes sc-sweep {
-    0% {
-        left: -40%;
+@supports not ((-webkit-background-clip: text) or (background-clip: text)) {
+    .sc-shimmer-text {
+        color: var(--sc-shimmer-base-color);
+        background: none;
+        -webkit-text-fill-color: currentColor;
+        animation: sc-loading-pulse var(--sc-shimmer-duration) ease-in-out infinite;
     }
+}
+
+@keyframes sc-text-shimmer {
+    from {
+        background-position: 100% center;
+    }
+    to {
+        background-position: 0% center;
+    }
+}
+
+@keyframes sc-loading-pulse {
+    0%,
     100% {
-        left: 120%;
+        opacity: 0.52;
+    }
+    50% {
+        opacity: 1;
     }
 }
 

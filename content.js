@@ -10,6 +10,8 @@
     let container = null;
     let conversationHistory = [];
     let currentAbortController = null;
+    let isAwaitingResponse = false;
+    let hasLocalConversationMutation = false;
     const chatMode = 'ask';
 
     // User Profile (personal info for personalization)
@@ -17,7 +19,7 @@
 
     // Session State
     let sessionId = 'session_' + Date.now() + '_' + Math.floor(Math.random() * 10000);
-    let sessionUrl = window.location.hostname || 'unknown';
+    let sessionUrl = window.location.href || window.location.hostname || 'unknown';
 
     // Auth State
     let messageCount = 0;
@@ -33,6 +35,7 @@
         'https://screenchat-backend-production.up.railway.app'
     ];
     const API_HEALTH_TIMEOUT_MS = 1400;
+    const CHAT_REQUEST_TIMEOUT_MS = 90000;
     let resolvedApiBaseUrl = null;
     let resolvingApiBasePromise = null;
 
@@ -127,12 +130,93 @@
         return `${baseUrl}${normalizeApiPath(path)}`;
     }
 
+    function serializeHeadersForProxy(headers) {
+        if (!headers) return undefined;
+        if (headers instanceof Headers) {
+            return Object.fromEntries(headers.entries());
+        }
+        if (Array.isArray(headers)) {
+            return Object.fromEntries(headers);
+        }
+        if (typeof headers === 'object') {
+            return { ...headers };
+        }
+        return undefined;
+    }
+
+    function normalizeProxyFetchOptions(options) {
+        if (!options || typeof options !== 'object') return {};
+
+        const proxyOptions = {};
+        if (typeof options.method === 'string') {
+            proxyOptions.method = options.method;
+        }
+
+        const serializedHeaders = serializeHeadersForProxy(options.headers);
+        if (serializedHeaders) {
+            proxyOptions.headers = serializedHeaders;
+        }
+
+        if (typeof options.body === 'string') {
+            proxyOptions.body = options.body;
+        }
+
+        return proxyOptions;
+    }
+
+    function responseFromProxyPayload(payload) {
+        const status = Number.isInteger(payload?.status) ? payload.status : 500;
+        const statusText = typeof payload?.statusText === 'string' ? payload.statusText : '';
+        const headers = payload?.headers && typeof payload.headers === 'object' ? payload.headers : {};
+        const bodyText = typeof payload?.bodyText === 'string' ? payload.bodyText : '';
+        return new Response(bodyText, { status, statusText, headers });
+    }
+
+    async function apiFetchViaBackground(requestUrl, options) {
+        const response = await chrome.runtime.sendMessage({
+            action: 'proxy_api_fetch',
+            url: requestUrl,
+            options: normalizeProxyFetchOptions(options)
+        });
+
+        if (!response?.ok) {
+            throw new Error(response?.error || 'Background API proxy failed');
+        }
+
+        return responseFromProxyPayload(response);
+    }
+
+    async function fetchWithProxyFallback(requestUrl, options) {
+        try {
+            return await fetch(requestUrl, options);
+        } catch (directError) {
+            if (directError?.name === 'AbortError') throw directError;
+            return apiFetchViaBackground(requestUrl, options);
+        }
+    }
+
     async function apiFetch(path, options) {
+        const normalizedPath = normalizeApiPath(path);
+        const initialUrl = await apiUrl(normalizedPath);
+        try {
+            return await fetchWithProxyFallback(initialUrl, options);
+        } catch (fetchError) {
+            const refreshedBaseUrl = await resolveApiBaseUrl({ forceRefresh: true });
+            const refreshedUrl = `${refreshedBaseUrl}${normalizedPath}`;
+            if (refreshedUrl !== initialUrl) {
+                return fetchWithProxyFallback(refreshedUrl, options);
+            }
+            throw fetchError;
+        }
+    }
+
+    async function apiFetchDirect(path, options) {
         const normalizedPath = normalizeApiPath(path);
         const initialUrl = await apiUrl(normalizedPath);
         try {
             return await fetch(initialUrl, options);
         } catch (fetchError) {
+            if (fetchError?.name === 'AbortError') throw fetchError;
             const refreshedBaseUrl = await resolveApiBaseUrl({ forceRefresh: true });
             const refreshedUrl = `${refreshedBaseUrl}${normalizedPath}`;
             if (refreshedUrl !== initialUrl) {
@@ -140,6 +224,263 @@
             }
             throw fetchError;
         }
+    }
+
+    function getReplyTextFromPayload(payload) {
+        return typeof payload?.reply === 'string' ? payload.reply : String(payload?.reply ?? '');
+    }
+
+    function createAbortError() {
+        const error = new Error('Request aborted');
+        error.name = 'AbortError';
+        return error;
+    }
+
+    function extractErrorMessageFromText(rawText, fallbackMessage = 'Backend failed') {
+        if (typeof rawText !== 'string') return fallbackMessage;
+        const trimmed = rawText.trim();
+        if (!trimmed) return fallbackMessage;
+        try {
+            const payload = JSON.parse(trimmed);
+            if (typeof payload?.error === 'string' && payload.error.trim()) {
+                return payload.error.trim();
+            }
+        } catch {
+            // Ignore parse failures and return plain text below.
+        }
+        return trimmed;
+    }
+
+    async function getApiErrorMessage(response, fallbackMessage = 'Backend failed') {
+        try {
+            const contentType = response.headers?.get('content-type') || '';
+            if (contentType.includes('application/json')) {
+                const payload = await response.json();
+                if (typeof payload?.error === 'string' && payload.error.trim()) {
+                    return payload.error.trim();
+                }
+            } else {
+                const text = await response.text();
+                return extractErrorMessageFromText(text, fallbackMessage);
+            }
+        } catch {
+            // Ignore parse failures and use fallback.
+        }
+        return fallbackMessage;
+    }
+
+    function parseStreamLine(line, onPartialText, state) {
+        const trimmed = line.trim();
+        if (!trimmed) return;
+        let event;
+        try {
+            event = JSON.parse(trimmed);
+        } catch {
+            return;
+        }
+
+        if (event?.type === 'delta' && typeof event.delta === 'string') {
+            state.reply += event.delta;
+            if (typeof onPartialText === 'function') {
+                onPartialText(state.reply);
+            }
+            return;
+        }
+
+        if (event?.type === 'done' && typeof event.reply === 'string') {
+            state.reply = event.reply;
+            if (typeof onPartialText === 'function') {
+                onPartialText(state.reply);
+            }
+            return;
+        }
+
+        if (event?.type === 'error') {
+            throw new Error(
+                typeof event.error === 'string' && event.error.trim()
+                    ? event.error.trim()
+                    : 'Backend stream failed'
+            );
+        }
+    }
+
+    function parseStreamBuffer(state, onPartialText) {
+        let newlineIndex = state.buffer.indexOf('\n');
+        while (newlineIndex !== -1) {
+            const line = state.buffer.slice(0, newlineIndex);
+            state.buffer = state.buffer.slice(newlineIndex + 1);
+            parseStreamLine(line, onPartialText, state);
+            newlineIndex = state.buffer.indexOf('\n');
+        }
+    }
+
+    function parseRemainingStreamBuffer(state, onPartialText) {
+        if (state.buffer.trim()) {
+            parseStreamLine(state.buffer, onPartialText, state);
+        }
+        state.buffer = '';
+    }
+
+    async function consumeNdjsonResponse(response, onPartialText, state) {
+        if (!response.body || typeof response.body.getReader !== 'function') {
+            const bufferedText = await response.text();
+            state.buffer += bufferedText;
+            parseStreamBuffer(state, onPartialText);
+            parseRemainingStreamBuffer(state, onPartialText);
+            return;
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            state.buffer += decoder.decode(value, { stream: true });
+            parseStreamBuffer(state, onPartialText);
+        }
+
+        state.buffer += decoder.decode();
+        parseStreamBuffer(state, onPartialText);
+        parseRemainingStreamBuffer(state, onPartialText);
+    }
+
+    async function requestChatReplyStreamViaBackground(payload, { signal, onPartialText } = {}) {
+        const requestUrl = await apiUrl('/api/chat/stream');
+        const streamOptions = normalizeProxyFetchOptions({
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        return new Promise((resolve, reject) => {
+            const port = chrome.runtime.connect({ name: 'proxy_api_stream' });
+            const state = { reply: '', buffer: '' };
+            let settled = false;
+
+            const cleanup = () => {
+                try {
+                    port.onMessage.removeListener(handleMessage);
+                    port.onDisconnect.removeListener(handleDisconnect);
+                } catch {
+                    // No-op.
+                }
+                if (signal && onAbort) {
+                    signal.removeEventListener('abort', onAbort);
+                }
+                try {
+                    port.disconnect();
+                } catch {
+                    // No-op.
+                }
+            };
+
+            const settleResolve = (value) => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                resolve(value);
+            };
+
+            const settleReject = (error) => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                reject(error instanceof Error ? error : new Error(String(error || 'Unknown error')));
+            };
+
+            const handleMessage = (message) => {
+                if (settled) return;
+                try {
+                    if (message?.type === 'http_error') {
+                        const messageText = extractErrorMessageFromText(message.bodyText, message.statusText || 'Backend failed');
+                        settleReject(new Error(messageText));
+                        return;
+                    }
+
+                    if (message?.type === 'error') {
+                        settleReject(new Error(message.error || 'Background stream failed'));
+                        return;
+                    }
+
+                    if (message?.type === 'chunk' && typeof message.chunk === 'string') {
+                        state.buffer += message.chunk;
+                        parseStreamBuffer(state, onPartialText);
+                        return;
+                    }
+
+                    if (message?.type === 'end') {
+                        parseRemainingStreamBuffer(state, onPartialText);
+                        settleResolve(state.reply || 'Sorry, I could not generate a response.');
+                    }
+                } catch (error) {
+                    settleReject(error);
+                }
+            };
+
+            const handleDisconnect = () => {
+                if (settled) return;
+                const runtimeError = chrome.runtime.lastError?.message;
+                settleReject(new Error(runtimeError || 'Background stream disconnected'));
+            };
+
+            const onAbort = () => {
+                try {
+                    port.postMessage({ type: 'abort' });
+                } catch {
+                    // No-op.
+                }
+                settleReject(createAbortError());
+            };
+
+            if (signal?.aborted) {
+                settleReject(createAbortError());
+                return;
+            }
+
+            port.onMessage.addListener(handleMessage);
+            port.onDisconnect.addListener(handleDisconnect);
+            if (signal) {
+                signal.addEventListener('abort', onAbort, { once: true });
+            }
+
+            port.postMessage({
+                type: 'start',
+                url: requestUrl,
+                options: streamOptions
+            });
+        });
+    }
+
+    async function requestChatReplyStream(payload, { signal, onPartialText } = {}) {
+        return requestChatReplyStreamViaBackground(payload, { signal, onPartialText });
+    }
+
+    async function requestChatReply(payload, { signal, onPartialText } = {}) {
+        try {
+            return await requestChatReplyStream(payload, { signal, onPartialText });
+        } catch (streamError) {
+            if (streamError?.name === 'AbortError') throw streamError;
+            console.warn('[Chat] Streaming failed, falling back to JSON response:', streamError);
+        }
+
+        const response = await apiFetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+            signal
+        });
+        if (!response.ok) {
+            const errorMessage = await getApiErrorMessage(response, 'Backend failed');
+            throw new Error(errorMessage);
+        }
+
+        const data = await response.json();
+        const reply = getReplyTextFromPayload(data);
+        if (typeof onPartialText === 'function') {
+            onPartialText(reply);
+        }
+        return reply;
     }
 
     // =============================================================================
@@ -469,6 +810,18 @@
         }
     };
 
+    async function getActiveTabUrl() {
+        try {
+            const response = await chrome.runtime.sendMessage({ action: 'get_active_tab_url' });
+            if (response?.ok && typeof response.url === 'string' && response.url.trim()) {
+                return response.url.trim();
+            }
+        } catch (error) {
+            console.warn('[Context] Failed to fetch active tab URL from background:', error);
+        }
+        return window.location.href || null;
+    }
+
     // -----------------------------------------------------------------------------
     // CONTEXT BUILDER - Minimal context for LLM
     // -----------------------------------------------------------------------------
@@ -479,7 +832,8 @@
 
         async build(mode = 'PLAN') {
             const config = this.modes[mode] || this.modes.PLAN;
-            const context = { url: window.location.href, title: document.title, mode };
+            const activeTabUrl = await getActiveTabUrl();
+            const context = { url: window.location.href, activeTabUrl, title: document.title, mode };
 
             OverlayStack.scan();
             ElementRegistry.scan(true);
@@ -507,6 +861,9 @@
 
         formatForLLM(context) {
             let msg = `[Page: ${context.url}]`;
+            if (context.activeTabUrl) {
+                msg += `\n[Active Tab URL: ${context.activeTabUrl}]`;
+            }
             if (context.activeContext?.type !== 'page') {
                 msg += `\n[Active: ${context.activeContext.type}${context.activeContext.title ? ` - "${context.activeContext.title}"` : ''}]`;
             }
@@ -1183,15 +1540,20 @@
         const prompts = shadowRoot?.getElementById('sc-quick-prompts');
         const messagesArea = shadowRoot?.getElementById('sc-messages');
         const hotkeyHint = shadowRoot?.getElementById('sc-hotkey-hint');
-        const hasUserMessage = conversationHistory.some((msg) => msg.role === 'user');
+        const hasUserMessageInHistory = conversationHistory.some((msg) => {
+            const role = typeof msg?.role === 'string' ? msg.role.trim().toLowerCase() : '';
+            return role === 'user' || role === 'human';
+        });
+        const hasUserMessageInDom = !!messagesArea?.querySelector('.sc-message.user');
+        const shouldHidePrompts = hasUserMessageInHistory || hasUserMessageInDom || isAwaitingResponse;
         if (prompts) {
-            prompts.classList.toggle('hidden', hasUserMessage);
+            prompts.classList.toggle('hidden', shouldHidePrompts);
         }
         if (hotkeyHint) {
-            hotkeyHint.classList.toggle('hidden', hasUserMessage);
+            hotkeyHint.classList.toggle('hidden', shouldHidePrompts);
         }
         if (messagesArea) {
-            messagesArea.classList.toggle('is-empty', !hasUserMessage);
+            messagesArea.classList.toggle('is-empty', !hasUserMessageInHistory && !hasUserMessageInDom && !isAwaitingResponse);
         }
     }
 
@@ -1224,9 +1586,11 @@
     }
 
     function startNewSession(resetUI = true, withTypewriter = false) {
-            sessionId = 'session_' + Date.now() + '_' + Math.floor(Math.random() * 10000);
-            sessionUrl = window.location.hostname || 'unknown';
-            conversationHistory = [];
+        sessionId = 'session_' + Date.now() + '_' + Math.floor(Math.random() * 10000);
+        sessionUrl = window.location.href || window.location.hostname || 'unknown';
+        conversationHistory = [];
+        isAwaitingResponse = false;
+        hasLocalConversationMutation = false;
         chrome.storage.local.remove(['conversationHistory']);
 
         if (resetUI) {
@@ -1395,17 +1759,22 @@
                 messageCount = result.messageCount;
             }
 
-            if (result.conversationHistory && result.conversationHistory.length > 0 && (!result.sessionDomain || result.sessionDomain === currentDomain)) {
-                conversationHistory = result.conversationHistory;
-                const messagesArea = shadowRoot.getElementById('sc-messages');
-                if (messagesArea) {
-                    messagesArea.innerHTML = '';
-                    conversationHistory.forEach((msg) => {
-                        addMessage(msg.content, msg.role === 'user' ? 'user' : 'ai', null, true);
-                    });
+            const messagesArea = shadowRoot.getElementById('sc-messages');
+            const uiAlreadyHasMessages = !!messagesArea?.querySelector('.sc-message');
+            const canHydrateConversation = !hasLocalConversationMutation && !uiAlreadyHasMessages && conversationHistory.length === 0;
+
+            if (canHydrateConversation) {
+                if (result.conversationHistory && result.conversationHistory.length > 0 && (!result.sessionDomain || result.sessionDomain === currentDomain)) {
+                    conversationHistory = result.conversationHistory;
+                    if (messagesArea) {
+                        messagesArea.innerHTML = '';
+                        conversationHistory.forEach((msg) => {
+                            addMessage(msg.content, msg.role === 'user' ? 'user' : 'ai', null, true);
+                        });
+                    }
+                } else {
+                    renderWelcomeMessage(true);
                 }
-            } else {
-                renderWelcomeMessage(true);
             }
             syncQuickPromptsVisibility();
         });
@@ -1785,6 +2154,7 @@
 
             textarea.value = '';
             textarea.style.height = 'auto';
+            hasLocalConversationMutation = true;
 
             addMessage(text, 'user');
 
@@ -1792,64 +2162,134 @@
             chrome.storage.local.set({ conversationHistory });
             syncQuickPromptsVisibility();
 
+            isAwaitingResponse = true;
             setInputState(false, 'Working...');
+            syncQuickPromptsVisibility();
 
             const loadingId = addLoadingMessage();
-            const context = await ContextBuilder.build('PLAN');
-            const contextString = ContextBuilder.formatForLLM(context);
+            let streamedMessageEl = null;
+            let latestStreamText = '';
+            let streamRenderPending = false;
+            let streamCancelled = false;
+            let requestTimedOut = false;
+            let requestTimeoutId = null;
 
-            const messagesPayload = conversationHistory.map((m, idx) => {
-                if (idx === conversationHistory.length - 1 && m.role === 'user') {
-                    return { role: 'user', content: `${contextString}\n\n${m.content}` };
+            const renderStreamMessage = () => {
+                if (streamCancelled) return;
+                if (!streamedMessageEl) {
+                    removeMessage(loadingId);
+                    streamedMessageEl = addMessage('', 'ai', null, true);
                 }
-                return m;
-            });
+                updateMessageContent(streamedMessageEl, latestStreamText);
+            };
+
+            const onPartialText = (partialReply) => {
+                if (streamCancelled) return;
+                latestStreamText = typeof partialReply === 'string'
+                    ? partialReply
+                    : String(partialReply ?? '');
+                if (streamRenderPending) return;
+                streamRenderPending = true;
+                requestAnimationFrame(() => {
+                    streamRenderPending = false;
+                    renderStreamMessage();
+                });
+            };
 
             try {
-                let attachedImage = null;
-                if (attachScreenEnabled) {
-                    try {
-                        attachedImage = await captureCurrentScreen();
-                    } catch (captureError) {
-                        console.warn('[ScreenCapture] Capture failed:', captureError);
+                const messagesPayload = conversationHistory.map((msg) => {
+                    if (msg?.role === 'user') {
+                        return { role: 'user', content: cleanUserMessage(msg.content) };
                     }
+                    if (msg?.role === 'assistant') {
+                        return { role: 'assistant', content: cleanAiReply(msg.content) };
+                    }
+                    return msg;
+                });
+                sessionUrl = window.location.href || sessionUrl;
+
+                let attachedImage = null;
+                try {
+                    attachedImage = await captureCurrentScreen();
+                } catch (captureError) {
+                    console.warn('[ScreenCapture] Capture failed:', captureError);
                 }
 
                 currentAbortController = new AbortController();
 
-                const response = await apiFetch('/api/chat', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        messages: messagesPayload,
-                        userId,
-                        sessionId,
-                        sessionUrl,
-                        mode: chatMode,
-                        profile: userProfile,
-                        image: attachedImage,
-                        elements: context.elements,
-                        activeContext: context.activeContext
+                const chatPayload = {
+                    messages: messagesPayload,
+                    userId,
+                    sessionId,
+                    sessionUrl,
+                    mode: chatMode,
+                    profile: userProfile,
+                    image: attachedImage
+                };
+
+                const responseText = await Promise.race([
+                    requestChatReply(chatPayload, {
+                        signal: currentAbortController.signal,
+                        onPartialText
                     }),
-                    signal: currentAbortController.signal
-                });
+                    new Promise((_, reject) => {
+                        requestTimeoutId = setTimeout(() => {
+                            requestTimedOut = true;
+                            try {
+                                currentAbortController?.abort();
+                            } catch {
+                                // No-op.
+                            }
+                            const timeoutError = new Error('Request timed out');
+                            timeoutError.name = 'TimeoutError';
+                            reject(timeoutError);
+                        }, CHAT_REQUEST_TIMEOUT_MS);
+                    })
+                ]);
 
-                if (!response.ok) throw new Error('Backend failed');
-                const data = await response.json();
-
+                if (streamRenderPending) {
+                    streamRenderPending = false;
+                    renderStreamMessage();
+                }
                 removeMessage(loadingId);
+                if (streamedMessageEl) {
+                    updateMessageContent(streamedMessageEl, responseText);
+                } else {
+                    addMessage(responseText, 'ai');
+                }
+                if (requestTimeoutId) {
+                    clearTimeout(requestTimeoutId);
+                    requestTimeoutId = null;
+                }
 
-                const responseText = typeof data.reply === 'string' ? data.reply : String(data.reply ?? '');
                 conversationHistory.push({ role: 'assistant', content: responseText });
                 chrome.storage.local.set({ conversationHistory });
-                addMessage(responseText, 'ai');
+                isAwaitingResponse = false;
                 setInputState(true);
+                syncQuickPromptsVisibility();
             } catch (backendErr) {
-                if (backendErr.name === 'AbortError') {
+                if (requestTimeoutId) {
+                    clearTimeout(requestTimeoutId);
+                    requestTimeoutId = null;
+                }
+                streamCancelled = true;
+                if (streamedMessageEl?.isConnected) {
+                    streamedMessageEl.remove();
+                }
+                if (backendErr.name === 'AbortError' || backendErr.name === 'TimeoutError') {
                     removeMessage(loadingId);
+                    isAwaitingResponse = false;
+                    setInputState(true);
+                    if (requestTimedOut) {
+                        addMessage(`Request timed out after ${Math.floor(CHAT_REQUEST_TIMEOUT_MS / 1000)} seconds. Please try again.`, 'ai');
+                        conversationHistory.pop();
+                        chrome.storage.local.set({ conversationHistory });
+                    }
+                    syncQuickPromptsVisibility();
                     return;
                 }
                 removeMessage(loadingId);
+                isAwaitingResponse = false;
                 setInputState(true);
                 const backendMessage = backendErr?.message || 'Unknown error';
                 const userError = backendMessage === 'Failed to fetch'
@@ -1858,6 +2298,7 @@
                 addMessage(userError, 'ai');
                 conversationHistory.pop();
                 chrome.storage.local.set({ conversationHistory });
+                syncQuickPromptsVisibility();
             }
         };
 
@@ -1880,16 +2321,7 @@
         textarea.addEventListener('keydown', onEnter);
     }
 
-    function addMessage(text, type, imageUrl = null, skipSave = false) {
-        const messagesArea = shadowRoot.getElementById('sc-messages');
-        const msgDiv = document.createElement('div');
-        msgDiv.className = `sc-message ${type}`;
-
-        let attachmentHtml = '';
-        if (imageUrl) {
-            attachmentHtml = `<div class="sc-attachment"><img src="${imageUrl}" alt="Screenshot"></div>`;
-        }
-
+    function formatMessageContent(text) {
         let formattedText = escapeHtml(text)
             .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
             .replace(/__(.*?)__/g, '<u>$1</u>')
@@ -1901,20 +2333,42 @@
             '<a href="$1" target="_blank" class="sc-inline-link">$1</a>'
         );
 
+        return formattedText;
+    }
+
+    function updateMessageContent(messageEl, text, imageUrl = null) {
+        if (!messageEl) return;
+        const bubble = messageEl.querySelector('.sc-bubble');
+        if (!bubble) return;
+
+        const attachmentHtml = imageUrl
+            ? `<div class="sc-attachment"><img src="${imageUrl}" alt="Screenshot"></div>`
+            : '';
+        const formattedText = formatMessageContent(typeof text === 'string' ? text : String(text ?? ''));
+        bubble.innerHTML = `${formattedText}${attachmentHtml}`;
+
+        const messagesArea = shadowRoot?.getElementById('sc-messages');
+        if (messagesArea) {
+            messagesArea.scrollTop = messagesArea.scrollHeight;
+        }
+    }
+
+    function addMessage(text, type, imageUrl = null, skipSave = false) {
+        const messagesArea = shadowRoot.getElementById('sc-messages');
+        const msgDiv = document.createElement('div');
+        msgDiv.className = `sc-message ${type}`;
+
         msgDiv.innerHTML = `
             <div class="sc-bubble">
-                ${formattedText}
-                ${attachmentHtml}
             </div>
             <div class="sc-timestamp">Just now</div>
         `;
+        updateMessageContent(msgDiv, text, imageUrl);
 
         messagesArea.appendChild(msgDiv);
         messagesArea.scrollTop = messagesArea.scrollHeight;
-
-        if (type === 'user') {
-            syncQuickPromptsVisibility();
-        }
+        syncQuickPromptsVisibility();
+        return msgDiv;
     }
 
     function toggleUI() {
@@ -2439,6 +2893,7 @@
 
         const context = {
             url: window.location.href,
+            activeTabUrl: await getActiveTabUrl(),
             title: document.title,
             htmlSnapshot: null
         };
@@ -2528,6 +2983,9 @@
     // --- Format Context for AI Message ---
     function formatContextForAI(context) {
         let msg = `[Page: ${context.url}]`;
+        if (context.activeTabUrl) {
+            msg += `\n[Active Tab URL: ${context.activeTabUrl}]`;
+        }
 
         if (context.activeContext.type !== 'page') {
             msg += `\n[ACTIVE: ${context.activeContext.description}]`;
@@ -2647,10 +3105,18 @@
         const messagesArea = shadowRoot.getElementById('sc-messages');
         const msgDiv = document.createElement('div');
         const id = 'loading-' + Date.now();
+        const shimmerSpreadPx = Math.max(24, text.length * 3);
         msgDiv.id = id;
         msgDiv.className = 'sc-message ai loading-bubble';
-        // Adapted status shimmer idea inspired by 21st.dev Text Shimmer (MIT).
-        msgDiv.innerHTML = `<div class="sc-bubble"><span class="sc-shimmer-text">${escapeHtml(text)}</span></div>`;
+        // Port of 21st.dev ibelick Text Shimmer behavior (MIT) adapted to vanilla CSS/JS.
+        msgDiv.innerHTML = `
+            <div class="sc-bubble">
+                <span
+                    class="sc-shimmer-text"
+                    style="--sc-shimmer-duration:1s;--sc-shimmer-spread:${shimmerSpreadPx}px;"
+                >${escapeHtml(text)}</span>
+            </div>
+        `;
         messagesArea.appendChild(msgDiv);
         messagesArea.scrollTop = messagesArea.scrollHeight;
         return id;
