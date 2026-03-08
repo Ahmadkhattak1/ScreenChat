@@ -6,13 +6,21 @@
     "permissions": [
         "activeTab",
         "storage",
-        "scripting"
+        "scripting",
+        "identity"
     ],
     "host_permissions": [
-        "http://localhost/*",
-        "http://127.0.0.1/*",
+        "http://127.0.0.1:3000/*",
+        "http://localhost:3000/*",
         "https://screenchat-backend-production.up.railway.app/*"
     ],
+    "oauth2": {
+        "client_id": "664186125970-m02q4pu5g6v4tf7mo1gg9h1mvslaergn.apps.googleusercontent.com",
+        "scopes": [
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/userinfo.profile"
+        ]
+    },
     "action": {
         "default_icon": {
             "16": "icons/icon16.png",

@@ -5,10 +5,14 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 const ALLOWED_API_ORIGINS = new Set([
-    'http://localhost:3000',
     'http://127.0.0.1:3000',
+    'http://localhost:3000',
     'https://screenchat-backend-production.up.railway.app'
 ]);
+const GOOGLE_AUTH_SCOPES = [
+    'https://www.googleapis.com/auth/userinfo.email',
+    'https://www.googleapis.com/auth/userinfo.profile'
+];
 const HOTKEY_DEBUG_ENABLED = true;
 let hotkeyRequestCounter = 0;
 
@@ -26,6 +30,96 @@ function isAllowedApiRequestUrl(rawUrl = '') {
         return ALLOWED_API_ORIGINS.has(parsed.origin);
     } catch {
         return false;
+    }
+}
+
+function isNonEmptyString(value) {
+    return typeof value === 'string' && value.trim().length > 0;
+}
+
+function extractGoogleAuthToken(result) {
+    if (typeof result === 'string') {
+        return result.trim();
+    }
+
+    if (result && typeof result === 'object' && typeof result.token === 'string') {
+        return result.token.trim();
+    }
+
+    return '';
+}
+
+function isGoogleSignInCanceledError(error) {
+    const message = String(error?.message || '').toLowerCase();
+    return (
+        message.includes('user did not approve') ||
+        message.includes('user cancelled') ||
+        message.includes('user canceled') ||
+        message.includes('user closed') ||
+        message.includes('access denied')
+    );
+}
+
+async function revokeGoogleAccessToken(token) {
+    const trimmed = isNonEmptyString(token) ? token.trim() : '';
+    if (!trimmed) return;
+    try {
+        await fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(trimmed)}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded'
+            }
+        });
+    } catch (error) {
+        console.warn('Failed to revoke Google access token:', error);
+    }
+}
+
+async function clearCachedGoogleAuthTokens(token = '') {
+    const trimmed = isNonEmptyString(token) ? token.trim() : '';
+    if (trimmed) {
+        try {
+            await chrome.identity.removeCachedAuthToken({ token: trimmed });
+        } catch (removeError) {
+            console.warn('Failed to remove cached Google auth token:', removeError);
+        }
+    }
+    await chrome.identity.clearAllCachedAuthTokens();
+}
+
+async function runGoogleSignInFlow() {
+    try {
+        let cachedToken = '';
+        try {
+            const cachedResult = await chrome.identity.getAuthToken({
+                interactive: false,
+                scopes: GOOGLE_AUTH_SCOPES
+            });
+            cachedToken = extractGoogleAuthToken(cachedResult);
+        } catch {
+            cachedToken = '';
+        }
+
+        if (cachedToken) {
+            await revokeGoogleAccessToken(cachedToken);
+        }
+        await clearCachedGoogleAuthTokens(cachedToken);
+
+        const result = await chrome.identity.getAuthToken({
+            interactive: true,
+            scopes: GOOGLE_AUTH_SCOPES,
+            enableGranularPermissions: true
+        });
+        const authToken = extractGoogleAuthToken(result);
+        if (!authToken) {
+            throw new Error('Google sign-in did not return an access token');
+        }
+        return { authToken };
+    } catch (error) {
+        if (isGoogleSignInCanceledError(error)) {
+            throw new Error('Google sign-in was canceled.');
+        }
+        throw new Error(error?.message || 'Google sign-in failed');
     }
 }
 
@@ -164,10 +258,33 @@ chrome.runtime.onConnect.addListener((port) => {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const action = message?.action;
-    if (action !== 'capture_visible_tab' && action !== 'get_active_tab_url' && action !== 'proxy_api_fetch') return undefined;
+    const supportedActions = new Set([
+        'capture_visible_tab',
+        'get_active_tab_url',
+        'proxy_api_fetch',
+        'google_sign_in',
+        'google_sign_out'
+    ]);
+    if (!supportedActions.has(action)) return undefined;
 
     (async () => {
         try {
+            if (action === 'google_sign_in') {
+                const result = await runGoogleSignInFlow();
+                sendResponse({ ok: true, ...result });
+                return;
+            }
+
+            if (action === 'google_sign_out') {
+                const authToken = typeof message?.authToken === 'string' ? message.authToken.trim() : '';
+                if (authToken) {
+                    await revokeGoogleAccessToken(authToken);
+                }
+                await clearCachedGoogleAuthTokens(authToken);
+                sendResponse({ ok: true });
+                return;
+            }
+
             if (action === 'capture_visible_tab') {
                 const windowId = sender?.tab?.windowId;
                 const image = await chrome.tabs.captureVisibleTab(windowId, { format: 'png' });
@@ -189,6 +306,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
             sendResponse({ ok: true, url: activeTab?.url || null });
         } catch (error) {
+            if (action === 'google_sign_in' || action === 'google_sign_out') {
+                console.warn('Google auth flow failed:', error);
+                sendResponse({ ok: false, error: error?.message || 'Google authentication failed' });
+                return;
+            }
             if (action === 'capture_visible_tab') {
                 console.error('Screen capture failed:', error);
                 sendResponse({ ok: false, error: 'Unable to capture current screen' });
