@@ -136,9 +136,41 @@
         });
     }
 
+    function isPrivateIpv4Address(hostname = '') {
+        const parts = hostname.split('.');
+        if (parts.length !== 4) return false;
+        const octets = parts.map((part) => Number(part));
+        if (octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return false;
+
+        if (octets[0] === 10) return true;
+        if (octets[0] === 127) return true;
+        if (octets[0] === 169 && octets[1] === 254) return true;
+        if (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) return true;
+        if (octets[0] === 192 && octets[1] === 168) return true;
+
+        return false;
+    }
+
+    function isLocalNetworkHostname(hostname = '') {
+        const normalized = String(hostname || '').trim().toLowerCase();
+        if (!normalized) return false;
+        return (
+            normalized === 'localhost' ||
+            normalized === '0.0.0.0' ||
+            normalized === '::1' ||
+            normalized === '[::1]' ||
+            normalized.endsWith('.local') ||
+            isPrivateIpv4Address(normalized)
+        );
+    }
+
     function isAllowedApiBaseUrl(baseUrl) {
         try {
             const parsed = new URL(baseUrl);
+            // Prevent local/private network probes, which trigger noisy browser permission prompts per-site.
+            if (parsed.protocol !== 'https:' || isLocalNetworkHostname(parsed.hostname)) {
+                return false;
+            }
             return ALLOWED_API_BASE_ORIGINS.has(parsed.origin);
         } catch {
             return false;
@@ -333,7 +365,10 @@
         if (overrideBaseUrl) candidateSet.add(overrideBaseUrl);
         if (cachedBaseUrl) candidateSet.add(cachedBaseUrl);
         for (const candidate of API_BASE_CANDIDATES) {
-            candidateSet.add(candidate);
+            const normalizedCandidate = normalizeApiBaseUrl(candidate);
+            if (normalizedCandidate) {
+                candidateSet.add(normalizedCandidate);
+            }
         }
         return Array.from(candidateSet);
     }
