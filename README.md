@@ -34,7 +34,8 @@ AI assistant, ChatGPT extension, AI browser assistant, webpage analyzer, screen 
 
 - Your data is encrypted and stored securely
 - Sign in with Google for secure authentication
-- No data is shared with third parties
+- Chat requests are sent to the ScreenChat backend to generate responses
+- Data may be processed by the AI provider configured on the backend
 
 ## 🧩 UI Attribution
 

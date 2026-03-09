@@ -5,8 +5,6 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 const ALLOWED_API_ORIGINS = new Set([
-    'http://127.0.0.1:3000',
-    'http://localhost:3000',
     'https://screenchat-backend-production.up.railway.app'
 ]);
 const GOOGLE_AUTH_SCOPES = [
@@ -87,39 +85,44 @@ async function clearCachedGoogleAuthTokens(token = '') {
     await chrome.identity.clearAllCachedAuthTokens();
 }
 
+async function requestGoogleAuthToken({ interactive = false } = {}) {
+    const result = await chrome.identity.getAuthToken({
+        interactive: !!interactive,
+        scopes: GOOGLE_AUTH_SCOPES,
+        enableGranularPermissions: true
+    });
+    const authToken = extractGoogleAuthToken(result);
+    if (!authToken) {
+        throw new Error('Google sign-in did not return an access token');
+    }
+    return authToken;
+}
+
 async function runGoogleSignInFlow() {
     try {
-        let cachedToken = '';
         try {
-            const cachedResult = await chrome.identity.getAuthToken({
-                interactive: false,
-                scopes: GOOGLE_AUTH_SCOPES
-            });
-            cachedToken = extractGoogleAuthToken(cachedResult);
+            const authToken = await requestGoogleAuthToken({ interactive: false });
+            return { authToken };
         } catch {
-            cachedToken = '';
+            // No silently available token; continue with interactive sign-in.
         }
 
-        if (cachedToken) {
-            await revokeGoogleAccessToken(cachedToken);
-        }
-        await clearCachedGoogleAuthTokens(cachedToken);
-
-        const result = await chrome.identity.getAuthToken({
-            interactive: true,
-            scopes: GOOGLE_AUTH_SCOPES,
-            enableGranularPermissions: true
-        });
-        const authToken = extractGoogleAuthToken(result);
-        if (!authToken) {
-            throw new Error('Google sign-in did not return an access token');
-        }
+        const authToken = await requestGoogleAuthToken({ interactive: true });
         return { authToken };
     } catch (error) {
         if (isGoogleSignInCanceledError(error)) {
             throw new Error('Google sign-in was canceled.');
         }
         throw new Error(error?.message || 'Google sign-in failed');
+    }
+}
+
+async function runGoogleSilentTokenRefresh() {
+    try {
+        const authToken = await requestGoogleAuthToken({ interactive: false });
+        return { authToken };
+    } catch (error) {
+        throw new Error(error?.message || 'No Google token available');
     }
 }
 
@@ -263,7 +266,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         'get_active_tab_url',
         'proxy_api_fetch',
         'google_sign_in',
-        'google_sign_out'
+        'google_sign_out',
+        'google_get_token_silent'
     ]);
     if (!supportedActions.has(action)) return undefined;
 
@@ -282,6 +286,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 }
                 await clearCachedGoogleAuthTokens(authToken);
                 sendResponse({ ok: true });
+                return;
+            }
+
+            if (action === 'google_get_token_silent') {
+                const result = await runGoogleSilentTokenRefresh();
+                sendResponse({ ok: true, ...result });
                 return;
             }
 
@@ -306,6 +316,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
             sendResponse({ ok: true, url: activeTab?.url || null });
         } catch (error) {
+            if (action === 'google_get_token_silent') {
+                sendResponse({ ok: false, error: error?.message || 'No Google token available' });
+                return;
+            }
             if (action === 'google_sign_in' || action === 'google_sign_out') {
                 console.warn('Google auth flow failed:', error);
                 sendResponse({ ok: false, error: error?.message || 'Google authentication failed' });

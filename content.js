@@ -26,14 +26,13 @@
     let authState = 'ANONYMOUS'; // ANONYMOUS | AUTHENTICATED
     let authSession = null;
     let isAuthSessionVerified = false;
+    let isAuthRestoreInFlight = false;
     let attachScreenEnabled = false;
     const API_BASE_CACHE_KEY = 'screenchat_api_base_url';
     const API_BASE_OVERRIDE_KEY = 'screenchat_api_base_override';
     const GOOGLE_OAUTH_CLIENT_ID_STORAGE_KEY = 'screenchat_google_oauth_client_id';
     const GOOGLE_OAUTH_CLIENT_ID_PLACEHOLDER = 'YOUR_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com';
     const API_BASE_CANDIDATES = [
-        'http://127.0.0.1:3000',
-        'http://localhost:3000',
         'https://screenchat-backend-production.up.railway.app'
     ];
     const ALLOWED_API_BASE_ORIGINS = new Set(
@@ -41,9 +40,101 @@
     );
     const API_HEALTH_TIMEOUT_MS = 1400;
     const CHAT_REQUEST_TIMEOUT_MS = 90000;
-    const FONT_AWESOME_CSS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css';
+    const TIMESTAMP_REFRESH_INTERVAL_MS = 60000;
+    const RELATIVE_TIME_FORMATTER = typeof Intl !== 'undefined' && typeof Intl.RelativeTimeFormat === 'function'
+        ? new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' })
+        : null;
     let resolvedApiBaseUrl = null;
     let resolvingApiBasePromise = null;
+
+    function parseTimestampMs(rawTimestamp) {
+        if (rawTimestamp === null || rawTimestamp === undefined || rawTimestamp === '') return null;
+
+        if (rawTimestamp instanceof Date) {
+            const dateMs = rawTimestamp.getTime();
+            return Number.isFinite(dateMs) ? dateMs : null;
+        }
+
+        if (typeof rawTimestamp === 'number') {
+            if (!Number.isFinite(rawTimestamp)) return null;
+            // Support both Unix seconds and milliseconds.
+            return rawTimestamp < 1000000000000 ? rawTimestamp * 1000 : rawTimestamp;
+        }
+
+        if (typeof rawTimestamp === 'string') {
+            const trimmed = rawTimestamp.trim();
+            if (!trimmed) return null;
+            const numeric = Number(trimmed);
+            if (Number.isFinite(numeric)) {
+                return numeric < 1000000000000 ? numeric * 1000 : numeric;
+            }
+
+            const parsedMs = Date.parse(trimmed);
+            return Number.isFinite(parsedMs) ? parsedMs : null;
+        }
+
+        return null;
+    }
+
+    function formatRelativeUnit(value, unit) {
+        if (RELATIVE_TIME_FORMATTER) {
+            return RELATIVE_TIME_FORMATTER.format(value, unit);
+        }
+        const abs = Math.abs(value);
+        const suffix = value < 0 ? 'ago' : 'from now';
+        const label = abs === 1 ? unit : `${unit}s`;
+        return `${abs} ${label} ${suffix}`;
+    }
+
+    function formatRelativeTimestamp(rawTimestamp, nowMs = Date.now()) {
+        const timestampMs = parseTimestampMs(rawTimestamp);
+        if (timestampMs === null) return 'Earlier';
+
+        const diffMs = timestampMs - nowMs;
+        const absMs = Math.abs(diffMs);
+        const minuteMs = 60 * 1000;
+        const hourMs = 60 * minuteMs;
+        const dayMs = 24 * hourMs;
+        const weekMs = 7 * dayMs;
+        const monthMs = 30 * dayMs;
+        const yearMs = 365 * dayMs;
+
+        if (absMs < 45 * 1000) return 'Just now';
+        if (absMs < hourMs) return formatRelativeUnit(Math.round(diffMs / minuteMs), 'minute');
+        if (absMs < dayMs) return formatRelativeUnit(Math.round(diffMs / hourMs), 'hour');
+        if (absMs < weekMs) return formatRelativeUnit(Math.round(diffMs / dayMs), 'day');
+        if (absMs < monthMs) return formatRelativeUnit(Math.round(diffMs / weekMs), 'week');
+        if (absMs < yearMs) return formatRelativeUnit(Math.round(diffMs / monthMs), 'month');
+        return formatRelativeUnit(Math.round(diffMs / yearMs), 'year');
+    }
+
+    function setMessageTimestamp(messageEl, rawTimestamp = Date.now()) {
+        if (!messageEl) return null;
+        const timestampEl = messageEl.querySelector('.sc-timestamp');
+        if (!timestampEl) return null;
+
+        const timestampMs = parseTimestampMs(rawTimestamp);
+        if (timestampMs === null) {
+            timestampEl.removeAttribute('data-timestamp');
+            timestampEl.textContent = formatRelativeTimestamp(null);
+            return null;
+        }
+
+        timestampEl.dataset.timestamp = String(timestampMs);
+        timestampEl.textContent = formatRelativeTimestamp(timestampMs);
+        return timestampMs;
+    }
+
+    function refreshVisibleTimestamps() {
+        if (!shadowRoot) return;
+        const nowMs = Date.now();
+        const timestampEls = shadowRoot.querySelectorAll('.sc-timestamp[data-timestamp]');
+        timestampEls.forEach((timestampEl) => {
+            const timestampMs = Number(timestampEl.dataset.timestamp);
+            if (!Number.isFinite(timestampMs)) return;
+            timestampEl.textContent = formatRelativeTimestamp(timestampMs, nowMs);
+        });
+    }
 
     function isAllowedApiBaseUrl(baseUrl) {
         try {
@@ -69,6 +160,60 @@
 
     function isNonEmptyString(value) {
         return typeof value === 'string' && value.trim().length > 0;
+    }
+
+    function getUserDisplayName(user) {
+        if (isNonEmptyString(user?.fullName)) return user.fullName.trim();
+        if (isNonEmptyString(user?.email)) return user.email.trim().split('@')[0];
+        return 'Google user';
+    }
+
+    function getAccountFullName() {
+        if (!isAuthenticated()) return '';
+        return isNonEmptyString(authSession?.user?.fullName)
+            ? authSession.user.fullName.trim()
+            : '';
+    }
+
+    function getAccountEmail() {
+        if (!isAuthenticated()) return '';
+        return isNonEmptyString(authSession?.user?.email)
+            ? authSession.user.email.trim()
+            : '';
+    }
+
+    function applyProfileFormValues(profileInputs, profile) {
+        const source = profile && typeof profile === 'object' && !Array.isArray(profile)
+            ? profile
+            : {};
+        const accountFullName = getAccountFullName();
+        const accountEmail = getAccountEmail();
+        const resolvedFullName = isNonEmptyString(source.fullName)
+            ? source.fullName.trim()
+            : accountFullName;
+        const resolvedEmail = isNonEmptyString(source.email)
+            ? source.email.trim()
+            : accountEmail;
+
+        if (profileInputs.profileNameInput) profileInputs.profileNameInput.value = resolvedFullName;
+        if (profileInputs.profileNicknameInput) profileInputs.profileNicknameInput.value = source.nickname || '';
+        if (profileInputs.profileEmailInput) profileInputs.profileEmailInput.value = resolvedEmail;
+        if (profileInputs.profilePhoneInput) profileInputs.profilePhoneInput.value = source.phone || '';
+        if (profileInputs.profileNotesInput) profileInputs.profileNotesInput.value = source.notes || '';
+
+        return {
+            fullName: resolvedFullName,
+            nickname: source.nickname || '',
+            email: resolvedEmail,
+            phone: source.phone || '',
+            notes: source.notes || ''
+        };
+    }
+
+    function getUserAvatarInitial(user) {
+        const displayName = getUserDisplayName(user);
+        const firstVisibleCharacter = Array.from(displayName).find((char) => /\S/.test(char));
+        return firstVisibleCharacter ? firstVisibleCharacter.toUpperCase() : 'G';
     }
 
     function isValidGoogleOauthClientId(rawValue = '') {
@@ -1328,7 +1473,8 @@
             profile: 'sc-profile-view'
         };
         const requestedPane = panes[pane] ? pane : 'chat';
-        const targetPane = isAuthenticated() ? requestedPane : 'auth';
+        const canAccessRequestedPane = isAuthenticated() || (isAuthRestoreInFlight && requestedPane === 'chat');
+        const targetPane = canAccessRequestedPane ? requestedPane : 'auth';
 
         for (const [key, id] of Object.entries(panes)) {
             const el = shadowRoot.getElementById(id);
@@ -1770,21 +1916,47 @@
     function syncAuthUi() {
         if (!shadowRoot) return;
         const authenticated = isAuthenticated();
-        const subtitle = shadowRoot.querySelector('.sc-subtitle');
         const authUserEl = shadowRoot.getElementById('sc-auth-user');
         const historyBtn = shadowRoot.getElementById('sc-history-btn');
         const profileBtn = shadowRoot.getElementById('sc-profile-btn');
         const newChatBtn = shadowRoot.getElementById('sc-new-chat');
         const attachToggle = shadowRoot.getElementById('sc-attach-screen-toggle');
+        const accountSummaryEl = shadowRoot.getElementById('sc-account-summary');
+        const accountAvatarEl = shadowRoot.getElementById('sc-account-avatar');
+        const accountAvatarFallbackEl = shadowRoot.getElementById('sc-account-avatar-fallback');
+        const accountNameEl = shadowRoot.getElementById('sc-account-name');
+        const accountEmailEl = shadowRoot.getElementById('sc-account-email');
+        const signedInUser = authenticated ? authSession?.user : null;
 
-        if (subtitle) {
-            subtitle.textContent = authenticated ? 'Page Assistant' : '';
-            subtitle.hidden = !authenticated;
-        }
         if (authUserEl) {
-            authUserEl.textContent = authenticated && authSession?.user?.email
-                ? `Signed in as ${authSession.user.email}`
+            authUserEl.textContent = authenticated && signedInUser?.email
+                ? `Signed in as ${signedInUser.email}`
                 : '';
+        }
+
+        if (accountSummaryEl) {
+            accountSummaryEl.hidden = !authenticated;
+        }
+        if (authenticated && signedInUser) {
+            if (accountNameEl) {
+                accountNameEl.textContent = getUserDisplayName(signedInUser);
+            }
+            if (accountEmailEl) {
+                accountEmailEl.textContent = signedInUser.email || '';
+            }
+            if (accountAvatarFallbackEl) {
+                accountAvatarFallbackEl.textContent = getUserAvatarInitial(signedInUser);
+            }
+            if (accountAvatarEl) {
+                const avatarUrl = isNonEmptyString(signedInUser.picture) ? signedInUser.picture.trim() : '';
+                if (avatarUrl) {
+                    accountAvatarEl.src = avatarUrl;
+                    accountAvatarEl.hidden = false;
+                } else {
+                    accountAvatarEl.removeAttribute('src');
+                    accountAvatarEl.hidden = true;
+                }
+            }
         }
 
         if (authenticated) {
@@ -1797,9 +1969,16 @@
         if (attachToggle) attachToggle.disabled = !authenticated;
 
         if (!authenticated) {
-            setInputState(false, 'Sign in with Google to continue...');
-            if (uiState.activePane !== 'auth') {
-                setActivePane('auth', false);
+            if (isAuthRestoreInFlight) {
+                setInputState(false, 'Restoring your session...');
+                if (uiState.activePane !== 'chat') {
+                    setActivePane('chat', false);
+                }
+            } else {
+                setInputState(false, 'Sign in with Google to continue...');
+                if (uiState.activePane !== 'auth') {
+                    setActivePane('auth', false);
+                }
             }
         } else if (!isAwaitingResponse) {
             setInputState(true, 'Ask me anything about this page...');
@@ -1810,6 +1989,7 @@
     }
 
     function requireAuthenticationUi(message = 'Please sign in with Google to continue.') {
+        isAuthRestoreInFlight = false;
         clearAuthSession();
         userProfile = null;
         profileLoadAttempted = false;
@@ -1844,13 +2024,14 @@
         if (!messagesArea) return;
 
         const welcomeText = "Hello! I'm ScreenChat. Ask anything about this page and I will help.";
+        const welcomeTimestamp = Date.now();
         if (withTypewriter && !hasTypedWelcome) {
             messagesArea.innerHTML = `
                 <div class="sc-message ai">
                     <div class="sc-bubble">
                         <span id="sc-welcome-typewriter" class="sc-typewriter-target"></span>
                     </div>
-                    <div class="sc-timestamp">Just now</div>
+                    <div class="sc-timestamp" data-timestamp="${welcomeTimestamp}">${formatRelativeTimestamp(welcomeTimestamp)}</div>
                 </div>
             `;
             const target = messagesArea.querySelector('#sc-welcome-typewriter');
@@ -1860,7 +2041,7 @@
             messagesArea.innerHTML = `
                 <div class="sc-message ai">
                     <div class="sc-bubble">${escapeHtml(welcomeText)}</div>
-                    <div class="sc-timestamp">Just now</div>
+                    <div class="sc-timestamp" data-timestamp="${welcomeTimestamp}">${formatRelativeTimestamp(welcomeTimestamp)}</div>
                 </div>
             `;
         }
@@ -2097,12 +2278,6 @@
         link.addEventListener('error', onStylesReady, { once: true });
         shadowRoot.appendChild(link);
 
-        const fontAwesomeLink = document.createElement('link');
-        fontAwesomeLink.rel = 'stylesheet';
-        fontAwesomeLink.href = FONT_AWESOME_CSS_URL;
-        fontAwesomeLink.referrerPolicy = 'no-referrer';
-        shadowRoot.appendChild(fontAwesomeLink);
-
         createUI();
         resolveApiBaseUrl().catch((error) => {
             console.warn('[API] Backend discovery failed:', error);
@@ -2126,6 +2301,7 @@
             if (!container) return;
             applyPanelGeometry();
         });
+        setInterval(refreshVisibleTimestamps, TIMESTAMP_REFRESH_INTERVAL_MS);
 
         migrateAndLoadUiState(() => {
             uiStateHydrated = true;
@@ -2165,8 +2341,10 @@
             }
 
             const storedAuthSession = normalizeStoredAuthSession(result[AUTH_SESSION_KEY]);
+            const hasStoredAuthSession = !!storedAuthSession;
             // Stored session must be re-validated with backend before UI treats it as signed in.
             setAuthSession(storedAuthSession, { persist: false, verified: false });
+            isAuthRestoreInFlight = hasStoredAuthSession;
             chrome.storage.local.set({ sessionDomain: currentDomain });
 
             if (result.screenchat_user || result.messageCount) {
@@ -2180,35 +2358,60 @@
             const messagesArea = shadowRoot.getElementById('sc-messages');
             const uiAlreadyHasMessages = !!messagesArea?.querySelector('.sc-message');
             const canHydrateConversation = !hasLocalConversationMutation && !uiAlreadyHasMessages && conversationHistory.length === 0;
+            const canUseStoredSessionData = isAuthenticated() || hasStoredAuthSession;
 
             if (canHydrateConversation) {
-                if (isAuthenticated() && result.conversationHistory && result.conversationHistory.length > 0 && (!result.sessionDomain || result.sessionDomain === currentDomain)) {
+                if (canUseStoredSessionData && result.conversationHistory && result.conversationHistory.length > 0 && (!result.sessionDomain || result.sessionDomain === currentDomain)) {
                     conversationHistory = result.conversationHistory;
                     if (messagesArea) {
                         messagesArea.innerHTML = '';
                         conversationHistory.forEach((msg) => {
-                            addMessage(msg.content, msg.role === 'user' ? 'user' : 'ai', null, true);
+                            const role = msg?.role === 'user' ? 'user' : 'ai';
+                            const content = typeof msg?.content === 'string' ? msg.content : String(msg?.content ?? '');
+                            addMessage(content, role, null, true, msg?.timestamp);
                         });
                     }
-                } else if (isAuthenticated()) {
+                } else if (canUseStoredSessionData) {
                     renderWelcomeMessage(true);
                 } else if (messagesArea) {
                     messagesArea.innerHTML = '';
                 }
             }
             const finalizeHydration = () => {
+                isAuthRestoreInFlight = false;
                 syncAuthUi();
                 syncQuickPromptsVisibility();
                 refreshProfileNudgeVisibility();
             };
 
-            if (!isAuthenticated()) {
+            if (!hasStoredAuthSession) {
                 finalizeHydration();
                 return;
             }
 
-            apiFetch('/api/auth/me')
-                .then(async (response) => {
+            setAuthStatus('Restoring your session...', false);
+            setActivePane('chat', false);
+            setInputState(false, 'Restoring your session...');
+
+            (async () => {
+                try {
+                    // Best effort: refresh token silently so persisted sessions survive token expiry.
+                    try {
+                        const silentTokenResponse = await chrome.runtime.sendMessage({ action: 'google_get_token_silent' });
+                        const silentToken = isNonEmptyString(silentTokenResponse?.authToken)
+                            ? silentTokenResponse.authToken.trim()
+                            : '';
+                        if (silentTokenResponse?.ok && silentToken) {
+                            setAuthSession({
+                                authToken: silentToken,
+                                user: storedAuthSession.user
+                            }, { verified: false });
+                        }
+                    } catch {
+                        // Continue with stored token if silent refresh is unavailable.
+                    }
+
+                    const response = await apiFetch('/api/auth/me');
                     if (!response.ok) {
                         if (isUnauthorizedResponse(response)) {
                             requireAuthenticationUi('Please sign in with Google to continue.');
@@ -2234,14 +2437,13 @@
                             emailVerified: !!user.emailVerified
                         }
                     });
-                })
-                .catch((error) => {
+                } catch (error) {
                     console.warn('[Auth] Stored session validation failed:', error);
                     requireAuthenticationUi('Please sign in with Google to continue.');
-                })
-                .finally(() => {
+                } finally {
                     finalizeHydration();
-                });
+                }
+            })();
         });
     }
 
@@ -2262,7 +2464,6 @@
                             <img src="${chrome.runtime.getURL('icons/icon48.png')}" class="sc-logo" alt="ScreenChat">
                             <div class="sc-brand-copy">
                                 <span class="sc-title">ScreenChat</span>
-                                <span class="sc-subtitle">Page Assistant</span>
                             </div>
                         </div>
                         <div class="sc-header-actions">
@@ -2296,8 +2497,8 @@
 
                 <div class="sc-pane sc-pane-auth" id="sc-auth-view">
                     <div class="sc-auth-card">
-                        <h3>Sign in to ScreenChat</h3>
-                        <p class="sc-auth-copy">Use Google to sync your chat history and continue where you left off.</p>
+                        <h3>Sign in</h3>
+                        <p class="sc-auth-copy">Sync chat history with Google.</p>
                         <button class="sc-google-signin-btn" id="sc-google-signin-btn" type="button">
                             <span aria-hidden="true">G</span>
                             Continue with Google
@@ -2352,8 +2553,7 @@
 
                 <div class="sc-pane" id="sc-history-view">
                     <div class="sc-pane-header">
-                        <h3>Chat History</h3>
-                        <button class="sc-btn-icon" id="sc-history-close" title="Back" aria-label="Back to chat">
+                        <button class="sc-btn-icon sc-back-btn" id="sc-history-close" aria-label="Back to chat">
                             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                                 <path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                             </svg>
@@ -2364,15 +2564,24 @@
 
                 <div class="sc-pane" id="sc-profile-view">
                     <div class="sc-pane-header">
-                        <h3>Personalize Experience</h3>
-                        <button class="sc-btn-icon" id="sc-profile-close" title="Back" aria-label="Back to chat">
+                        <button class="sc-btn-icon sc-back-btn" id="sc-profile-close" aria-label="Back to chat">
                             <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
                                 <path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                             </svg>
                         </button>
                     </div>
                     <div class="sc-profile-content">
-                        <p class="sc-profile-desc">Optional info to personalize your experience and tailor responses.</p>
+                        <div class="sc-account-summary" id="sc-account-summary" hidden>
+                            <div class="sc-account-avatar-wrap" aria-hidden="true">
+                                <img class="sc-account-avatar" id="sc-account-avatar" alt="" hidden>
+                                <span class="sc-account-avatar-fallback" id="sc-account-avatar-fallback">G</span>
+                            </div>
+                            <div class="sc-account-meta">
+                                <p class="sc-account-name" id="sc-account-name"></p>
+                                <p class="sc-account-email" id="sc-account-email"></p>
+                            </div>
+                        </div>
+                        <p class="sc-profile-desc">Optional personalization details for how ScreenChat should use your information in responses. This does not change your main Google account information.</p>
                         <div class="sc-profile-field">
                             <label for="sc-profile-name">Full Name</label>
                             <input type="text" id="sc-profile-name" placeholder="John Doe">
@@ -2396,7 +2605,11 @@
                         <button class="sc-profile-save" id="sc-profile-save" type="button">Save Profile</button>
                         <div class="sc-profile-footer">
                             <button class="sc-profile-signout" id="sc-profile-signout" type="button" title="Sign out" aria-label="Sign out">
-                                <i class="fa-solid fa-right-from-bracket" aria-hidden="true"></i>
+                                <svg class="sc-profile-signout-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                    <path d="M14 7l5 5-5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                    <path d="M19 12H9" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                                    <path d="M10 4H6a2 2 0 00-2 2v12a2 2 0 002 2h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                                </svg>
                                 <span class="sc-visually-hidden">Sign out</span>
                             </button>
                         </div>
@@ -2472,7 +2685,10 @@
             if (!profileSignOutBtn) return;
             if (state === 'loading') {
                 profileSignOutBtn.innerHTML = `
-                    <i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i>
+                    <svg class="sc-profile-signout-icon sc-icon-spin" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="2" opacity="0.28"></circle>
+                        <path d="M12 4a8 8 0 017.7 5.9" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+                    </svg>
                     <span class="sc-visually-hidden">Signing out</span>
                 `;
                 profileSignOutBtn.setAttribute('title', 'Signing out...');
@@ -2481,7 +2697,11 @@
             }
             if (state === 'error') {
                 profileSignOutBtn.innerHTML = `
-                    <i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i>
+                    <svg class="sc-profile-signout-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <path d="M12 3.6l8.2 14.2c.42.73-.1 1.64-.94 1.64H4.72c-.84 0-1.36-.91-.94-1.64L12 3.6z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"></path>
+                        <path d="M12 8.9v4.9" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+                        <circle cx="12" cy="16.8" r="1" fill="currentColor"></circle>
+                    </svg>
                     <span class="sc-visually-hidden">Sign out failed</span>
                 `;
                 profileSignOutBtn.setAttribute('title', 'Sign out failed. Try again.');
@@ -2489,7 +2709,11 @@
                 return;
             }
             profileSignOutBtn.innerHTML = `
-                <i class="fa-solid fa-right-from-bracket" aria-hidden="true"></i>
+                <svg class="sc-profile-signout-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M14 7l5 5-5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+                    <path d="M19 12H9" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+                    <path d="M10 4H6a2 2 0 00-2 2v12a2 2 0 002 2h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+                </svg>
                 <span class="sc-visually-hidden">Sign out</span>
             `;
             profileSignOutBtn.setAttribute('title', 'Sign out');
@@ -2643,6 +2867,7 @@
                 }
                 profileNudgeSkippedThisSession = true;
                 refreshProfileNudgeVisibility();
+                loadProfile();
                 openPane('profile');
             });
         }
@@ -2687,17 +2912,24 @@
 
                 const data = await response.json();
                 if (data.profile && typeof data.profile === 'object' && !Array.isArray(data.profile)) {
-                    userProfile = data.profile;
-                    if (profileNameInput) profileNameInput.value = data.profile.fullName || '';
-                    if (profileNicknameInput) profileNicknameInput.value = data.profile.nickname || '';
-                    if (profileEmailInput) profileEmailInput.value = data.profile.email || '';
-                    if (profilePhoneInput) profilePhoneInput.value = data.profile.phone || '';
-                    if (profileNotesInput) profileNotesInput.value = data.profile.notes || '';
-                    if (hasAnyProfileValue(data.profile)) {
+                    userProfile = applyProfileFormValues({
+                        profileNameInput,
+                        profileNicknameInput,
+                        profileEmailInput,
+                        profilePhoneInput,
+                        profileNotesInput
+                    }, data.profile);
+                    if (hasAnyProfileValue(userProfile)) {
                         setProfileNudgeOptOut(true);
                     }
                 } else {
-                    userProfile = null;
+                    userProfile = applyProfileFormValues({
+                        profileNameInput,
+                        profileNicknameInput,
+                        profileEmailInput,
+                        profilePhoneInput,
+                        profileNotesInput
+                    }, null);
                 }
             } catch (e) {
                 console.error('[Profile] Load error:', e);
@@ -2812,6 +3044,7 @@
                     if (profileNotesInput) profileNotesInput.value = '';
 
                     setAuthStatus('Signed out.', false);
+                    setProfileSignOutState('idle');
                     syncAuthUi();
                     setActivePane('auth');
                     setUiMode('open');
@@ -2870,7 +3103,7 @@
                             <button class="sc-history-open" title="Open Conversation">Open</button>
                         `;
                         const openBtn = item.querySelector('.sc-history-open');
-                        openBtn?.addEventListener('click', () => restoreSession(session.id, session.url));
+                        openBtn?.addEventListener('click', () => restoreSession(session.id, session.url, session.updatedAt));
                         listContainer.appendChild(item);
                     });
                 } else {
@@ -2882,7 +3115,7 @@
             }
         }
 
-        async function restoreSession(sid, url) {
+        async function restoreSession(sid, url, fallbackTimestamp = null) {
             const listContainer = shadowRoot.getElementById('sc-history-list');
             if (!listContainer) return;
             if (!isAuthenticated()) {
@@ -2912,8 +3145,12 @@
                     messagesArea.innerHTML = '';
                     conversationHistory.forEach((msg) => {
                         const content = msg.role === 'user' ? cleanUserMessage(msg.content) : cleanAiReply(msg.content);
+                        const resolvedTimestampMs = parseTimestampMs(msg?.timestamp ?? fallbackTimestamp);
+                        if (!msg?.timestamp && resolvedTimestampMs !== null && msg && typeof msg === 'object') {
+                            msg.timestamp = new Date(resolvedTimestampMs).toISOString();
+                        }
                         if (content && content.toLowerCase() !== 'continue') {
-                            addMessage(content, msg.role === 'user' ? 'user' : 'ai', null, true);
+                            addMessage(content, msg.role === 'user' ? 'user' : 'ai', null, true, msg?.timestamp ?? fallbackTimestamp);
                         }
                     });
 
@@ -2968,9 +3205,10 @@
             textarea.style.height = 'auto';
             hasLocalConversationMutation = true;
 
-            addMessage(text, 'user');
+            const userMessageTimestamp = new Date().toISOString();
+            addMessage(text, 'user', null, false, userMessageTimestamp);
 
-            conversationHistory.push({ role: 'user', content: text });
+            conversationHistory.push({ role: 'user', content: text, timestamp: userMessageTimestamp });
             chrome.storage.local.set({ conversationHistory });
             syncQuickPromptsVisibility();
 
@@ -3011,10 +3249,18 @@
             try {
                 const messagesPayload = conversationHistory.map((msg) => {
                     if (msg?.role === 'user') {
-                        return { role: 'user', content: cleanUserMessage(msg.content) };
+                        return {
+                            role: 'user',
+                            content: cleanUserMessage(msg.content),
+                            timestamp: msg.timestamp
+                        };
                     }
                     if (msg?.role === 'assistant') {
-                        return { role: 'assistant', content: cleanAiReply(msg.content) };
+                        return {
+                            role: 'assistant',
+                            content: cleanAiReply(msg.content),
+                            timestamp: msg.timestamp
+                        };
                     }
                     return msg;
                 });
@@ -3070,17 +3316,23 @@
                     renderStreamMessage();
                 }
                 removeMessage(loadingId);
+                const assistantMessageTimestamp = new Date().toISOString();
                 if (streamedMessageEl) {
                     updateMessageContent(streamedMessageEl, responseText);
+                    setMessageTimestamp(streamedMessageEl, assistantMessageTimestamp);
                 } else {
-                    addMessage(responseText, 'ai');
+                    addMessage(responseText, 'ai', null, false, assistantMessageTimestamp);
                 }
                 if (requestTimeoutId) {
                     clearTimeout(requestTimeoutId);
                     requestTimeoutId = null;
                 }
 
-                conversationHistory.push({ role: 'assistant', content: responseText });
+                conversationHistory.push({
+                    role: 'assistant',
+                    content: responseText,
+                    timestamp: assistantMessageTimestamp
+                });
                 chrome.storage.local.set({ conversationHistory });
                 isAwaitingResponse = false;
                 setInputState(true);
@@ -3373,7 +3625,7 @@
         }
     }
 
-    function addMessage(text, type, imageUrl = null, skipSave = false) {
+    function addMessage(text, type, imageUrl = null, skipSave = false, timestamp = Date.now()) {
         const messagesArea = shadowRoot.getElementById('sc-messages');
         const msgDiv = document.createElement('div');
         msgDiv.className = `sc-message ${type}`;
@@ -3381,8 +3633,9 @@
         msgDiv.innerHTML = `
             <div class="sc-bubble">
             </div>
-            <div class="sc-timestamp">Just now</div>
+            <div class="sc-timestamp"></div>
         `;
+        setMessageTimestamp(msgDiv, timestamp);
         updateMessageContent(msgDiv, text, imageUrl);
 
         messagesArea.appendChild(msgDiv);
