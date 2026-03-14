@@ -1,0 +1,6 @@
+{
+  "apiBaseUrl": "https://screenchat-backend-production.up.railway.app",
+  "apiBaseCandidates": [
+    "https://screenchat-backend-production.up.railway.app"
+  ]
+}
