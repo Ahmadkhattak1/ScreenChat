@@ -49,6 +49,14 @@ AI assistant, ChatGPT extension, AI browser assistant, webpage analyzer, screen 
 - Email: ahdfactz@gmail.com
 - Buy Me a Coffee: https://buymeacoffee.com/AhmadKhattak
 
+## Configuration
+
+- Frontend extension config is build-time, not runtime.
+- `ScreenChat/.env` is only used to generate `runtime-config.json`.
+- The packaged extension reads `runtime-config.json` at runtime.
+- If you change the backend URL, rerun `node .\scripts\sync-runtime-config.mjs` and reload the extension.
+- Release process and deployment rules are documented in [RELEASE_SOP.md](C:/Users/Ahdfa/OneDrive/Desktop/Projects/Screenchat/ScreenChat/RELEASE_SOP.md).
+
 ---
 
 **Made with ❤️ by Ahmad Khattak**

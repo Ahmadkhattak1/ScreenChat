@@ -12,17 +12,19 @@
     let currentAbortController = null;
     let isAwaitingResponse = false;
     let hasLocalConversationMutation = false;
-    const chatMode = 'ask';
-
     // User Profile (personal info for personalization)
     let userProfile = null;
 
     // Session State
-    let sessionId = 'session_' + Date.now() + '_' + Math.floor(Math.random() * 10000);
+    let sessionId = createSessionId();
     let sessionUrl = window.location.href || window.location.hostname || 'unknown';
+    let sessionUpdatedAt = null;
 
     // Auth State
     const AUTH_SESSION_KEY = 'screenchat_auth_session';
+    const CONVERSATION_HISTORY_KEY = 'conversationHistory';
+    const SESSION_STATE_KEY = 'screenchat_session_state';
+    const LEGACY_SESSION_DOMAIN_KEY = 'sessionDomain';
     let authState = 'ANONYMOUS'; // ANONYMOUS | AUTHENTICATED
     let authSession = null;
     let isAuthSessionVerified = false;
@@ -30,22 +32,22 @@
     let attachScreenEnabled = false;
     const API_BASE_CACHE_KEY = 'screenchat_api_base_url';
     const API_BASE_OVERRIDE_KEY = 'screenchat_api_base_override';
-    const GOOGLE_OAUTH_CLIENT_ID_STORAGE_KEY = 'screenchat_google_oauth_client_id';
-    const GOOGLE_OAUTH_CLIENT_ID_PLACEHOLDER = 'YOUR_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com';
-    const API_BASE_CANDIDATES = [
-        'https://screenchat-backend-production.up.railway.app'
-    ];
-    const ALLOWED_API_BASE_ORIGINS = new Set(
-        API_BASE_CANDIDATES.map((candidate) => new URL(candidate).origin)
-    );
+    const RUNTIME_CONFIG_URL = chrome.runtime.getURL('runtime-config.json');
     const API_HEALTH_TIMEOUT_MS = 1400;
     const CHAT_REQUEST_TIMEOUT_MS = 90000;
     const TIMESTAMP_REFRESH_INTERVAL_MS = 60000;
+    const WEB_SIGN_IN_POLL_INTERVAL_MS = 900;
+    const WEB_SIGN_IN_TIMEOUT_MS = 3 * 60 * 1000;
     const RELATIVE_TIME_FORMATTER = typeof Intl !== 'undefined' && typeof Intl.RelativeTimeFormat === 'function'
         ? new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' })
         : null;
     let resolvedApiBaseUrl = null;
     let resolvingApiBasePromise = null;
+    let authRefreshPromise = null;
+    let hostedAuthBackendCheckPromise = null;
+    let runtimeConfigLoadPromise = null;
+    let apiBaseCandidates = [];
+    let allowedApiBaseOrigins = new Set();
 
     function parseTimestampMs(rawTimestamp) {
         if (rawTimestamp === null || rawTimestamp === undefined || rawTimestamp === '') return null;
@@ -74,6 +76,74 @@
         }
 
         return null;
+    }
+
+    function toIsoTimestamp(rawTimestamp) {
+        const timestampMs = parseTimestampMs(rawTimestamp);
+        return timestampMs === null ? null : new Date(timestampMs).toISOString();
+    }
+
+    function createSessionId() {
+        return `session_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
+    }
+
+    function normalizeConversationRole(rawRole) {
+        const normalized = String(rawRole || '').trim().toLowerCase();
+        if (normalized === 'user') return 'user';
+        if (normalized === 'assistant' || normalized === 'ai') return 'assistant';
+        return '';
+    }
+
+    function normalizeConversationEntry(entry) {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+        const role = normalizeConversationRole(entry.role);
+        if (!role) return null;
+        const content = typeof entry.content === 'string'
+            ? entry.content
+            : String(entry.content ?? '');
+        if (!content.trim()) return null;
+
+        return {
+            role,
+            content,
+            timestamp: toIsoTimestamp(entry.timestamp)
+        };
+    }
+
+    function normalizeConversationHistory(entries) {
+        if (!Array.isArray(entries)) return [];
+        return entries
+            .map((entry) => normalizeConversationEntry(entry))
+            .filter(Boolean);
+    }
+
+    function getLatestConversationTimestamp(history = conversationHistory) {
+        if (!Array.isArray(history)) return null;
+        for (let i = history.length - 1; i >= 0; i -= 1) {
+            const entryTimestamp = toIsoTimestamp(history[i]?.timestamp);
+            if (entryTimestamp) return entryTimestamp;
+        }
+        return null;
+    }
+
+    function normalizeStoredSessionState(rawState) {
+        if (!rawState || typeof rawState !== 'object' || Array.isArray(rawState)) return null;
+
+        const storedSessionId = isNonEmptyString(rawState.sessionId) ? rawState.sessionId.trim() : '';
+        const storedSessionUrl = isNonEmptyString(rawState.sessionUrl) ? rawState.sessionUrl.trim() : '';
+        const storedUpdatedAt = toIsoTimestamp(rawState.updatedAt);
+        const storedSessionDomain = isNonEmptyString(rawState.sessionDomain) ? rawState.sessionDomain.trim() : '';
+
+        if (!storedSessionId && !storedSessionUrl && !storedUpdatedAt && !storedSessionDomain) {
+            return null;
+        }
+
+        return {
+            sessionId: storedSessionId || createSessionId(),
+            sessionUrl: storedSessionUrl || window.location.href || window.location.hostname || 'unknown',
+            updatedAt: storedUpdatedAt,
+            sessionDomain: storedSessionDomain
+        };
     }
 
     function formatRelativeUnit(value, unit) {
@@ -164,14 +234,76 @@
         );
     }
 
+    function isLoopbackHostname(hostname = '') {
+        const normalized = String(hostname || '').trim().toLowerCase();
+        return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1' || normalized === '[::1]';
+    }
+
+    function isAllowedConfiguredApiOrigin(parsed) {
+        if (!parsed) return false;
+        if (parsed.protocol === 'https:') {
+            return !isLocalNetworkHostname(parsed.hostname) || isLoopbackHostname(parsed.hostname);
+        }
+        return parsed.protocol === 'http:' && isLoopbackHostname(parsed.hostname);
+    }
+
+    function normalizeConfiguredApiBaseUrl(rawValue) {
+        if (typeof rawValue !== 'string') return null;
+        const trimmed = rawValue.trim();
+        if (!trimmed) return null;
+
+        try {
+            const parsed = new URL(trimmed.replace(/\/+$/, ''));
+            if (!isAllowedConfiguredApiOrigin(parsed)) {
+                return null;
+            }
+            return parsed.origin;
+        } catch {
+            return null;
+        }
+    }
+
+    async function ensureRuntimeConfigLoaded() {
+        if (apiBaseCandidates.length > 0) return;
+        if (!runtimeConfigLoadPromise) {
+            runtimeConfigLoadPromise = (async () => {
+                const response = await fetch(RUNTIME_CONFIG_URL, { cache: 'no-store' });
+                if (!response.ok) {
+                    throw new Error('Failed to load extension runtime config');
+                }
+
+                const payload = await response.json().catch(() => null);
+                const configuredCandidates = Array.isArray(payload?.apiBaseCandidates)
+                    ? payload.apiBaseCandidates
+                    : (typeof payload?.apiBaseUrl === 'string' ? [payload.apiBaseUrl] : []);
+                const normalizedCandidates = configuredCandidates
+                    .map((candidate) => normalizeConfiguredApiBaseUrl(candidate))
+                    .filter(Boolean);
+
+                if (!normalizedCandidates.length) {
+                    throw new Error('No valid backend URL configured for ScreenChat');
+                }
+
+                apiBaseCandidates = Array.from(new Set(normalizedCandidates));
+                allowedApiBaseOrigins = new Set(
+                    apiBaseCandidates.map((candidate) => new URL(candidate).origin)
+                );
+            })().catch((error) => {
+                runtimeConfigLoadPromise = null;
+                throw error;
+            });
+        }
+        return runtimeConfigLoadPromise;
+    }
+
     function isAllowedApiBaseUrl(baseUrl) {
         try {
             const parsed = new URL(baseUrl);
             // Prevent local/private network probes, which trigger noisy browser permission prompts per-site.
-            if (parsed.protocol !== 'https:' || isLocalNetworkHostname(parsed.hostname)) {
+            if (!isAllowedConfiguredApiOrigin(parsed)) {
                 return false;
             }
-            return ALLOWED_API_BASE_ORIGINS.has(parsed.origin);
+            return allowedApiBaseOrigins.has(parsed.origin);
         } catch {
             return false;
         }
@@ -188,6 +320,25 @@
     function normalizeApiPath(path) {
         if (typeof path !== 'string' || path.length === 0) return '/';
         return path.startsWith('/') ? path : `/${path}`;
+    }
+
+    function isLoopbackApiBaseUrl(baseUrl) {
+        if (!isNonEmptyString(baseUrl)) return false;
+        try {
+            return isLoopbackHostname(new URL(baseUrl).hostname);
+        } catch {
+            return false;
+        }
+    }
+
+    function getUnreachableBackendMessage() {
+        const activeBaseUrl = normalizeApiBaseUrl(resolvedApiBaseUrl)
+            || normalizeApiBaseUrl(apiBaseCandidates[0])
+            || '';
+        if (isLoopbackApiBaseUrl(activeBaseUrl)) {
+            return 'Unable to reach ScreenChat backend. The extension is currently targeting localhost. If your backend is hosted on Railway, update ScreenChat/.env, rerun node .\\scripts\\sync-runtime-config.mjs, then reload the extension.';
+        }
+        return 'Unable to reach ScreenChat backend. Confirm the backend is running, then reload the extension.';
     }
 
     function isNonEmptyString(value) {
@@ -215,16 +366,15 @@
     }
 
     function applyProfileFormValues(profileInputs, profile) {
-        const source = profile && typeof profile === 'object' && !Array.isArray(profile)
-            ? profile
-            : {};
+        const hasStoredProfile = profile && typeof profile === 'object' && !Array.isArray(profile);
+        const source = hasStoredProfile ? profile : {};
         const accountFullName = getAccountFullName();
         const accountEmail = getAccountEmail();
-        const resolvedFullName = isNonEmptyString(source.fullName)
-            ? source.fullName.trim()
+        const resolvedFullName = hasStoredProfile
+            ? (isNonEmptyString(source.fullName) ? source.fullName.trim() : '')
             : accountFullName;
-        const resolvedEmail = isNonEmptyString(source.email)
-            ? source.email.trim()
+        const resolvedEmail = hasStoredProfile
+            ? (isNonEmptyString(source.email) ? source.email.trim() : '')
             : accountEmail;
 
         if (profileInputs.profileNameInput) profileInputs.profileNameInput.value = resolvedFullName;
@@ -248,13 +398,6 @@
         return firstVisibleCharacter ? firstVisibleCharacter.toUpperCase() : 'G';
     }
 
-    function isValidGoogleOauthClientId(rawValue = '') {
-        const value = String(rawValue || '').trim();
-        if (!value) return false;
-        if (value === GOOGLE_OAUTH_CLIENT_ID_PLACEHOLDER) return false;
-        return /\.apps\.googleusercontent\.com$/i.test(value);
-    }
-
     function normalizeStoredAuthSession(rawSession) {
         if (!rawSession || typeof rawSession !== 'object' || Array.isArray(rawSession)) {
             return null;
@@ -263,6 +406,9 @@
         const authToken = isNonEmptyString(rawSession.authToken)
             ? rawSession.authToken.trim()
             : (isNonEmptyString(rawSession.idToken) ? rawSession.idToken.trim() : '');
+        const refreshToken = isNonEmptyString(rawSession.refreshToken)
+            ? rawSession.refreshToken.trim()
+            : '';
         const userSource = rawSession.user && typeof rawSession.user === 'object' ? rawSession.user : {};
         const normalizedUser = {
             id: isNonEmptyString(userSource.id) ? userSource.id.trim() : '',
@@ -277,6 +423,7 @@
 
         return {
             authToken,
+            refreshToken,
             user: normalizedUser
         };
     }
@@ -287,6 +434,10 @@
 
     function getAuthToken() {
         return normalizeStoredAuthSession(authSession)?.authToken || '';
+    }
+
+    function getRefreshToken() {
+        return normalizeStoredAuthSession(authSession)?.refreshToken || '';
     }
 
     function setAuthSession(session, { persist = true, verified = true } = {}) {
@@ -342,21 +493,148 @@
         return new Promise((resolve) => chrome.storage.local.set(data, resolve));
     }
 
-    async function isBackendReachable(baseUrl) {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), API_HEALTH_TIMEOUT_MS);
+    function getSessionDomainForUrl(urlValue = sessionUrl) {
+        if (!isNonEmptyString(urlValue)) {
+            return window.location.hostname;
+        }
         try {
-            const response = await fetch(`${baseUrl}/health`, {
-                method: 'GET',
-                signal: controller.signal
-            });
+            return new URL(urlValue).hostname || window.location.hostname;
+        } catch {
+            return window.location.hostname;
+        }
+    }
+
+    function persistConversationState({ updatedAt = sessionUpdatedAt } = {}) {
+        const resolvedUpdatedAt = toIsoTimestamp(updatedAt) || getLatestConversationTimestamp(conversationHistory);
+        sessionUpdatedAt = resolvedUpdatedAt;
+        const sessionState = {
+            sessionId,
+            sessionUrl,
+            updatedAt: sessionUpdatedAt,
+            sessionDomain: getSessionDomainForUrl(sessionUrl)
+        };
+
+        chrome.storage.local.set({
+            [CONVERSATION_HISTORY_KEY]: conversationHistory,
+            [SESSION_STATE_KEY]: sessionState,
+            [LEGACY_SESSION_DOMAIN_KEY]: sessionState.sessionDomain
+        });
+    }
+
+    function clearPersistedConversationState() {
+        sessionUpdatedAt = null;
+        chrome.storage.local.remove([CONVERSATION_HISTORY_KEY, SESSION_STATE_KEY, LEGACY_SESSION_DOMAIN_KEY]);
+    }
+
+    function renderConversationHistory(historyEntries, { fallbackTimestamp = null, withTypewriter = false } = {}) {
+        const messagesArea = shadowRoot?.getElementById('sc-messages');
+        if (!messagesArea) return;
+
+        messagesArea.innerHTML = '';
+        const normalizedHistory = normalizeConversationHistory(historyEntries);
+        if (!normalizedHistory.length) {
+            renderWelcomeMessage(withTypewriter);
+            return;
+        }
+
+        normalizedHistory.forEach((entry) => {
+            const role = normalizeConversationRole(entry.role);
+            const content = role === 'user' ? cleanUserMessage(entry.content) : cleanAiReply(entry.content);
+            const timestamp = entry.timestamp || fallbackTimestamp;
+            if (!content || content.toLowerCase() === 'continue') return;
+            addMessage(content, role === 'user' ? 'user' : 'ai', null, true, timestamp);
+        });
+    }
+
+    function applyConversationState({ sessionId: nextSessionId, sessionUrl: nextSessionUrl, history, updatedAt, persist = true, withTypewriter = false } = {}) {
+        if (isNonEmptyString(nextSessionId)) {
+            sessionId = nextSessionId.trim();
+        } else if (!isNonEmptyString(sessionId)) {
+            sessionId = createSessionId();
+        }
+
+        if (isNonEmptyString(nextSessionUrl)) {
+            sessionUrl = nextSessionUrl.trim();
+        }
+
+        conversationHistory = normalizeConversationHistory(history);
+        sessionUpdatedAt = toIsoTimestamp(updatedAt) || getLatestConversationTimestamp(conversationHistory);
+        hasLocalConversationMutation = false;
+        renderConversationHistory(conversationHistory, { fallbackTimestamp: sessionUpdatedAt, withTypewriter });
+        if (persist) {
+            persistConversationState({ updatedAt: sessionUpdatedAt });
+        }
+        syncQuickPromptsVisibility();
+    }
+
+    function buildClientContext() {
+        const userAgent = typeof navigator !== 'undefined' ? navigator.userAgent || '' : '';
+        const platform = typeof navigator !== 'undefined' ? navigator.platform || '' : '';
+        const normalizedUserAgent = userAgent.toLowerCase();
+        const normalizedPlatform = platform.toLowerCase();
+
+        let browser = '';
+        if (normalizedUserAgent.includes('edg/')) browser = 'Edge';
+        else if (normalizedUserAgent.includes('opr/') || normalizedUserAgent.includes('opera')) browser = 'Opera';
+        else if (normalizedUserAgent.includes('firefox/')) browser = 'Firefox';
+        else if (normalizedUserAgent.includes('chrome/') && !normalizedUserAgent.includes('edg/') && !normalizedUserAgent.includes('opr/')) browser = 'Chrome';
+        else if (normalizedUserAgent.includes('safari/') && !normalizedUserAgent.includes('chrome/')) browser = 'Safari';
+
+        let os = '';
+        if (normalizedUserAgent.includes('windows') || normalizedPlatform.includes('win')) os = 'Windows';
+        else if (normalizedUserAgent.includes('mac os') || normalizedUserAgent.includes('macintosh') || normalizedPlatform.includes('mac')) os = 'macOS';
+        else if (normalizedUserAgent.includes('android')) os = 'Android';
+        else if (normalizedUserAgent.includes('iphone') || normalizedUserAgent.includes('ipad') || normalizedUserAgent.includes('ios')) os = 'iOS';
+        else if (normalizedUserAgent.includes('linux') || normalizedPlatform.includes('linux')) os = 'Linux';
+        else if (normalizedUserAgent.includes('cros')) os = 'ChromeOS';
+
+        let deviceType = 'desktop';
+        if (normalizedUserAgent.includes('ipad') || normalizedUserAgent.includes('tablet')) deviceType = 'tablet';
+        else if (normalizedUserAgent.includes('mobile') || normalizedUserAgent.includes('iphone') || normalizedUserAgent.includes('android')) deviceType = 'mobile';
+
+        return {
+            userAgent,
+            platform,
+            browser,
+            os,
+            deviceType,
+            pageHostname: window.location.hostname || '',
+            extensionVersion: chrome.runtime.getManifest()?.version || ''
+        };
+    }
+
+    function formatHistoryLocation(rawUrl) {
+        if (!isNonEmptyString(rawUrl)) return 'Unknown page';
+        try {
+            const parsed = new URL(rawUrl);
+            const hostname = parsed.hostname || rawUrl;
+            const path = parsed.pathname && parsed.pathname !== '/' ? parsed.pathname : '';
+            return `${hostname}${path}`;
+        } catch {
+            return rawUrl;
+        }
+    }
+
+    function formatHistoryPreview(session = {}) {
+        if (isNonEmptyString(session.lastMessagePreview)) return session.lastMessagePreview.trim();
+        if (isNonEmptyString(session.lastUserMessage)) return session.lastUserMessage.trim();
+        if (isNonEmptyString(session.lastAssistantMessage)) return session.lastAssistantMessage.trim();
+        return 'Conversation saved in your ScreenChat history.';
+    }
+
+    async function isBackendReachable(baseUrl) {
+        try {
+            const response = await Promise.race([
+                apiFetchViaBackground(`${baseUrl}/health`, { method: 'GET' }),
+                new Promise((_, reject) => {
+                    setTimeout(() => reject(new Error('Backend health check timed out')), API_HEALTH_TIMEOUT_MS);
+                })
+            ]);
             if (!response.ok) return false;
             const payload = await response.json().catch(() => null);
             return Boolean(payload?.ok || response.ok);
         } catch {
             return false;
-        } finally {
-            clearTimeout(timeoutId);
         }
     }
 
@@ -364,7 +642,7 @@
         const candidateSet = new Set();
         if (overrideBaseUrl) candidateSet.add(overrideBaseUrl);
         if (cachedBaseUrl) candidateSet.add(cachedBaseUrl);
-        for (const candidate of API_BASE_CANDIDATES) {
+        for (const candidate of apiBaseCandidates) {
             const normalizedCandidate = normalizeApiBaseUrl(candidate);
             if (normalizedCandidate) {
                 candidateSet.add(normalizedCandidate);
@@ -374,6 +652,7 @@
     }
 
     async function resolveApiBaseUrl({ forceRefresh = false } = {}) {
+        await ensureRuntimeConfigLoaded();
         if (!forceRefresh && resolvedApiBaseUrl) return resolvedApiBaseUrl;
         if (!forceRefresh && resolvingApiBasePromise) return resolvingApiBasePromise;
 
@@ -402,7 +681,7 @@
                 }
             }
 
-            resolvedApiBaseUrl = overrideBaseUrl || cachedBaseUrl || API_BASE_CANDIDATES[0];
+            resolvedApiBaseUrl = overrideBaseUrl || cachedBaseUrl || apiBaseCandidates[0];
             return resolvedApiBaseUrl;
         })().finally(() => {
             resolvingApiBasePromise = null;
@@ -474,24 +753,142 @@
 
     async function fetchWithProxyFallback(requestUrl, options) {
         try {
-            return await fetch(requestUrl, options);
-        } catch (directError) {
-            if (directError?.name === 'AbortError') throw directError;
-            return apiFetchViaBackground(requestUrl, options);
+            return await apiFetchViaBackground(requestUrl, options);
+        } catch (proxyError) {
+            try {
+                return await fetch(requestUrl, options);
+            } catch (directError) {
+                if (directError?.name === 'AbortError') throw directError;
+                throw proxyError;
+            }
         }
+    }
+
+    function wait(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    async function refreshAuthSession() {
+        const currentSession = normalizeStoredAuthSession(authSession);
+        if (!currentSession?.refreshToken) return null;
+        if (authRefreshPromise) return authRefreshPromise;
+
+        authRefreshPromise = (async () => {
+            const requestUrl = await apiUrl('/api/auth/refresh');
+            const response = await fetchWithProxyFallback(requestUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ refreshToken: currentSession.refreshToken })
+            });
+
+            if (!response.ok) {
+                clearAuthSession();
+                return null;
+            }
+
+            const payload = await response.json().catch(() => null);
+            const nextSession = normalizeStoredAuthSession({
+                authToken: isNonEmptyString(payload?.authToken) ? payload.authToken.trim() : '',
+                refreshToken: isNonEmptyString(payload?.refreshToken)
+                    ? payload.refreshToken.trim()
+                    : currentSession.refreshToken,
+                user: payload?.user
+            });
+
+            if (!nextSession) {
+                clearAuthSession();
+                return null;
+            }
+
+            setAuthSession(nextSession);
+            return nextSession;
+        })().finally(() => {
+            authRefreshPromise = null;
+        });
+
+        return authRefreshPromise;
+    }
+
+    async function beginHostedGoogleSignIn() {
+        await ensureHostedGoogleAuthBackendReady();
+        const baseUrl = await resolveApiBaseUrl();
+        const tempId = `auth_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+        const loginUrl = `${baseUrl}/google-login.html?tempId=${encodeURIComponent(tempId)}`;
+        const popup = window.open(loginUrl, 'screenchat-google-signin', 'popup=yes,width=520,height=720');
+
+        if (!popup) {
+            throw new Error('Sign-in popup was blocked. Allow popups and try again.');
+        }
+
+        try {
+            popup.focus();
+        } catch {
+            // No-op.
+        }
+
+        const deadline = Date.now() + WEB_SIGN_IN_TIMEOUT_MS;
+        while (Date.now() < deadline) {
+            const statusResponse = await apiFetch(
+                `/api/auth/status?tempId=${encodeURIComponent(tempId)}`,
+                { method: 'GET' },
+                { includeAuth: false }
+            );
+
+            if (statusResponse.ok) {
+                const statusPayload = await statusResponse.json().catch(() => null);
+                const nextSession = normalizeStoredAuthSession({
+                    authToken: statusPayload?.authToken,
+                    refreshToken: statusPayload?.refreshToken,
+                    user: statusPayload?.user
+                });
+
+                if (statusPayload?.linked && nextSession) {
+                    try {
+                        popup.close();
+                    } catch {
+                        // No-op.
+                    }
+                    return nextSession;
+                }
+            }
+
+            if (popup.closed) {
+                throw new Error('Google sign-in window was closed before completion.');
+            }
+
+            await wait(WEB_SIGN_IN_POLL_INTERVAL_MS);
+        }
+
+        try {
+            popup.close();
+        } catch {
+            // No-op.
+        }
+
+        throw new Error('Google sign-in timed out. Please try again.');
     }
 
     async function apiFetch(path, options, { includeAuth = true } = {}) {
         const normalizedPath = normalizeApiPath(path);
-        const requestOptions = withAuthHeaders(options, { includeAuth });
         const initialUrl = await apiUrl(normalizedPath);
+        const makeRequest = (requestUrl) => fetchWithProxyFallback(
+            requestUrl,
+            withAuthHeaders(options, { includeAuth })
+        );
         try {
-            return await fetchWithProxyFallback(initialUrl, requestOptions);
+            let response = await makeRequest(initialUrl);
+            if (response.status === 401 && includeAuth && getRefreshToken()) {
+                const refreshedSession = await refreshAuthSession();
+                if (refreshedSession?.authToken) {
+                    response = await makeRequest(initialUrl);
+                }
+            }
+            return response;
         } catch (fetchError) {
             const refreshedBaseUrl = await resolveApiBaseUrl({ forceRefresh: true });
             const refreshedUrl = `${refreshedBaseUrl}${normalizedPath}`;
             if (refreshedUrl !== initialUrl) {
-                return fetchWithProxyFallback(refreshedUrl, requestOptions);
+                return makeRequest(refreshedUrl);
             }
             throw fetchError;
         }
@@ -514,31 +911,9 @@
         }
     }
 
-    async function syncGoogleOauthClientIdFromBackend() {
-        try {
-            const response = await apiFetch('/api/auth/config', undefined, { includeAuth: false });
-            if (!response.ok) return;
-
-            const payload = await response.json().catch(() => null);
-            const candidateClientId = typeof payload?.googleOauthClientId === 'string'
-                ? payload.googleOauthClientId.trim()
-                : '';
-            if (!isValidGoogleOauthClientId(candidateClientId)) return;
-
-            const stored = await storageGet([GOOGLE_OAUTH_CLIENT_ID_STORAGE_KEY]);
-            const existingClientId = typeof stored?.[GOOGLE_OAUTH_CLIENT_ID_STORAGE_KEY] === 'string'
-                ? stored[GOOGLE_OAUTH_CLIENT_ID_STORAGE_KEY].trim()
-                : '';
-            if (existingClientId === candidateClientId) return;
-
-            await storageSet({ [GOOGLE_OAUTH_CLIENT_ID_STORAGE_KEY]: candidateClientId });
-        } catch (error) {
-            console.warn('[Auth] OAuth client ID sync failed:', error);
-        }
-    }
-
     function getReplyTextFromPayload(payload) {
-        return typeof payload?.reply === 'string' ? payload.reply : String(payload?.reply ?? '');
+        const rawReply = typeof payload?.reply === 'string' ? payload.reply : String(payload?.reply ?? '');
+        return cleanAiReply(rawReply);
     }
 
     function createAbortError() {
@@ -580,6 +955,62 @@
         return fallbackMessage;
     }
 
+    function getMissingFirebaseConfigKeys(config) {
+        const requiredKeys = ['apiKey', 'authDomain', 'projectId', 'storageBucket', 'messagingSenderId', 'appId'];
+        return requiredKeys.filter((key) => !isNonEmptyString(config?.[key]));
+    }
+
+    async function ensureHostedGoogleAuthBackendReady() {
+        if (hostedAuthBackendCheckPromise) return hostedAuthBackendCheckPromise;
+
+        hostedAuthBackendCheckPromise = (async () => {
+            const authConfigResponse = await apiFetch(
+                '/api/auth/config',
+                { method: 'GET' },
+                { includeAuth: false }
+            );
+            if (authConfigResponse.status === 404) {
+                throw new Error('ScreenChat backend is missing /api/auth/config. Deploy the latest backend to Railway, then reload the extension.');
+            }
+            if (!authConfigResponse.ok) {
+                throw new Error(await getApiErrorMessage(authConfigResponse, 'Unable to load ScreenChat auth config.'));
+            }
+
+            const authConfig = await authConfigResponse.json().catch(() => null);
+            if (isNonEmptyString(authConfig?.googleOauthClientId)) {
+                throw new Error('ScreenChat is still pointing at the old OAuth backend. Reload the extension with the correct runtime config, or deploy the latest backend.');
+            }
+            if (isNonEmptyString(authConfig?.authMode) && authConfig.authMode !== 'firebase-web') {
+                throw new Error(`Unsupported auth mode from backend: ${authConfig.authMode}`);
+            }
+
+            const firebaseConfigResponse = await apiFetch(
+                '/api/firebase-config',
+                { method: 'GET' },
+                { includeAuth: false }
+            );
+            if (firebaseConfigResponse.status === 404) {
+                throw new Error('ScreenChat backend is missing /api/firebase-config. Deploy the latest backend to Railway, then reload the extension.');
+            }
+            if (!firebaseConfigResponse.ok) {
+                throw new Error(await getApiErrorMessage(firebaseConfigResponse, 'Unable to load Firebase config from ScreenChat backend.'));
+            }
+
+            const firebaseConfig = await firebaseConfigResponse.json().catch(() => null);
+            const missingKeys = getMissingFirebaseConfigKeys(firebaseConfig);
+            if (missingKeys.length > 0) {
+                throw new Error(`ScreenChat backend Firebase config is incomplete: ${missingKeys.join(', ')}`);
+            }
+
+            return { authConfig, firebaseConfig };
+        })().catch((error) => {
+            hostedAuthBackendCheckPromise = null;
+            throw error;
+        });
+
+        return hostedAuthBackendCheckPromise;
+    }
+
     function parseStreamLine(line, onPartialText, state) {
         const trimmed = line.trim();
         if (!trimmed) return;
@@ -593,7 +1024,7 @@
         if (event?.type === 'delta' && typeof event.delta === 'string') {
             state.reply += event.delta;
             if (typeof onPartialText === 'function') {
-                onPartialText(state.reply);
+                onPartialText(cleanAiReply(state.reply, { allowPartial: true }));
             }
             return;
         }
@@ -601,7 +1032,7 @@
         if (event?.type === 'done' && typeof event.reply === 'string') {
             state.reply = event.reply;
             if (typeof onPartialText === 'function') {
-                onPartialText(state.reply);
+                onPartialText(cleanAiReply(state.reply));
             }
             return;
         }
@@ -725,7 +1156,7 @@
 
                     if (message?.type === 'end') {
                         parseRemainingStreamBuffer(state, onPartialText);
-                        settleResolve(state.reply || 'Sorry, I could not generate a response.');
+                        settleResolve(cleanAiReply(state.reply) || 'Sorry, I could not generate a response.');
                     }
                 } catch (error) {
                     settleReject(error);
@@ -1209,15 +1640,139 @@
         return message.trim();
     }
 
-    function cleanAiReply(reply) {
-        if (!reply) return '';
-        try {
-            const parsed = JSON.parse(reply);
-            if (parsed.message) return parsed.message;
-        } catch (e) {
-            // Not JSON, use as-is
+    function buildCurrentPageUrlContext(currentUrl) {
+        if (!isNonEmptyString(currentUrl)) return '';
+        return `[Current URL: ${currentUrl.trim()}]`;
+    }
+
+    function attachCurrentPageUrlContext(messages, currentUrl) {
+        const normalizedMessages = Array.isArray(messages)
+            ? messages.map((message) => (message && typeof message === 'object' ? { ...message } : message))
+            : [];
+        const pageContext = buildCurrentPageUrlContext(currentUrl);
+        if (!pageContext) return normalizedMessages;
+
+        for (let i = normalizedMessages.length - 1; i >= 0; i -= 1) {
+            const message = normalizedMessages[i];
+            if (message?.role !== 'user' || !isNonEmptyString(message?.content)) continue;
+
+            normalizedMessages[i] = {
+                ...message,
+                content: `${pageContext}\n\n${cleanUserMessage(message.content)}`
+            };
+            break;
         }
-        return reply;
+
+        return normalizedMessages;
+    }
+
+    function stripMarkdownCodeFence(rawText) {
+        if (!isNonEmptyString(rawText)) return '';
+        const trimmed = rawText.trim();
+        const match = trimmed.match(/^```(?:json|javascript|js|text|markdown)?\s*([\s\S]*?)\s*```$/i);
+        return match ? match[1].trim() : trimmed;
+    }
+
+    function extractStructuredReplyText(value) {
+        if (isNonEmptyString(value)) {
+            return value.trim();
+        }
+
+        if (Array.isArray(value)) {
+            for (const item of value) {
+                const extracted = extractStructuredReplyText(item);
+                if (isNonEmptyString(extracted)) {
+                    return extracted.trim();
+                }
+            }
+            return '';
+        }
+
+        if (!value || typeof value !== 'object') {
+            return '';
+        }
+
+        const directKeys = ['message', 'reply', 'content', 'text', 'output_text', 'outputText', 'answer', 'value', 'nextStep'];
+        for (const key of directKeys) {
+            if (!(key in value)) continue;
+            const extracted = extractStructuredReplyText(value[key]);
+            if (isNonEmptyString(extracted)) {
+                return extracted.trim();
+            }
+        }
+
+        const nestedKeys = ['output', 'choices', 'data', 'response', 'result'];
+        for (const key of nestedKeys) {
+            if (!(key in value)) continue;
+            const extracted = extractStructuredReplyText(value[key]);
+            if (isNonEmptyString(extracted)) {
+                return extracted.trim();
+            }
+        }
+
+        return '';
+    }
+
+    function extractPartialJsonMessage(rawReply) {
+        if (!isNonEmptyString(rawReply)) return '';
+        const normalized = stripMarkdownCodeFence(rawReply);
+        if (!normalized || !/^[{\[]/.test(normalized)) return '';
+
+        const match = normalized.match(/"message"\s*:\s*"((?:\\.|[^"\\])*)"/s);
+        if (!match) return '';
+
+        try {
+            return JSON.parse(`"${match[1]}"`);
+        } catch {
+            return match[1]
+                .replace(/\\"/g, '"')
+                .replace(/\\n/g, '\n')
+                .replace(/\\r/g, '\r')
+                .replace(/\\t/g, '\t');
+        }
+    }
+
+    function cleanAiReply(reply, { allowPartial = false } = {}) {
+        if (reply === null || reply === undefined) return '';
+
+        const rawText = typeof reply === 'string' ? reply : JSON.stringify(reply);
+        const trimmed = rawText.trim();
+        if (!trimmed) return '';
+
+        const candidates = [trimmed];
+        const unfenced = stripMarkdownCodeFence(trimmed);
+        if (unfenced && unfenced !== trimmed) {
+            candidates.unshift(unfenced);
+        }
+
+        for (const candidate of candidates) {
+            if (!candidate) continue;
+            const firstChar = candidate[0];
+            if (!['{', '[', '"'].includes(firstChar)) continue;
+
+            try {
+                const parsed = JSON.parse(candidate);
+                const extracted = extractStructuredReplyText(parsed);
+                if (isNonEmptyString(extracted)) {
+                    return extracted.trim();
+                }
+            } catch {
+                // Ignore parse failures and fall back below.
+            }
+        }
+
+        if (allowPartial) {
+            const partialMessage = extractPartialJsonMessage(trimmed);
+            if (isNonEmptyString(partialMessage)) {
+                return partialMessage;
+            }
+
+            if (/^(?:```(?:json|javascript|js)?\s*)?[\[{]/i.test(trimmed)) {
+                return '';
+            }
+        }
+
+        return rawText;
     }
 
     // UI State
@@ -1769,12 +2324,9 @@
             idx += 1;
             if (idx <= fullText.length) {
                 setTimeout(tick, speed);
-            } else {
-                target.classList.remove('typing');
             }
         };
 
-        target.classList.add('typing');
         tick();
     }
 
@@ -2033,6 +2585,63 @@
         setActivePane('auth');
     }
 
+    let latestHistorySyncPromise = null;
+
+    async function syncLatestHistoryIntoChat({ force = false } = {}) {
+        if (!isAuthenticated()) return false;
+        if (latestHistorySyncPromise) return latestHistorySyncPromise;
+
+        latestHistorySyncPromise = (async () => {
+            const hasConversation = conversationHistory.length > 0;
+            if (!force && hasLocalConversationMutation) {
+                return false;
+            }
+
+            const response = await apiFetch('/api/history/latest');
+            if (!response.ok) {
+                if (isUnauthorizedResponse(response)) {
+                    requireAuthenticationUi('Please sign in again to sync your history.');
+                    return false;
+                }
+                throw new Error(await getApiErrorMessage(response, 'Failed to sync history'));
+            }
+
+            const payload = await response.json();
+            const remoteSession = payload?.session && typeof payload.session === 'object' ? payload.session : null;
+            const remoteHistory = normalizeConversationHistory(payload?.history);
+            if (!remoteSession?.id || !remoteHistory.length) {
+                return false;
+            }
+
+            const remoteUpdatedAt = toIsoTimestamp(remoteSession.updatedAt);
+            const localUpdatedAt = toIsoTimestamp(sessionUpdatedAt) || getLatestConversationTimestamp(conversationHistory);
+            const shouldHydrate = force || !hasConversation || !localUpdatedAt || (
+                remoteUpdatedAt && parseTimestampMs(remoteUpdatedAt) > (parseTimestampMs(localUpdatedAt) || 0)
+            );
+
+            if (!shouldHydrate) {
+                return false;
+            }
+
+            applyConversationState({
+                sessionId: remoteSession.id,
+                sessionUrl: remoteSession.url,
+                history: remoteHistory,
+                updatedAt: remoteUpdatedAt,
+                persist: true,
+                withTypewriter: false
+            });
+            return true;
+        })().catch((error) => {
+            console.warn('[History] Latest session sync failed:', error);
+            return false;
+        }).finally(() => {
+            latestHistorySyncPromise = null;
+        });
+
+        return latestHistorySyncPromise;
+    }
+
     function syncQuickPromptsVisibility() {
         const prompts = shadowRoot?.getElementById('sc-quick-prompts');
         const messagesArea = shadowRoot?.getElementById('sc-messages');
@@ -2070,7 +2679,7 @@
                 </div>
             `;
             const target = messagesArea.querySelector('#sc-welcome-typewriter');
-            runTypewriter(target, welcomeText, 20);
+            runTypewriter(target, welcomeText, 10);
             hasTypedWelcome = true;
         } else {
             messagesArea.innerHTML = `
@@ -2084,12 +2693,13 @@
     }
 
     function startNewSession(resetUI = true, withTypewriter = false) {
-        sessionId = 'session_' + Date.now() + '_' + Math.floor(Math.random() * 10000);
+        sessionId = createSessionId();
         sessionUrl = window.location.href || window.location.hostname || 'unknown';
+        sessionUpdatedAt = null;
         conversationHistory = [];
         isAwaitingResponse = false;
         hasLocalConversationMutation = false;
-        chrome.storage.local.remove(['conversationHistory']);
+        clearPersistedConversationState();
 
         if (resetUI) {
             renderWelcomeMessage(withTypewriter);
@@ -2317,7 +2927,6 @@
         resolveApiBaseUrl().catch((error) => {
             console.warn('[API] Backend discovery failed:', error);
         });
-        syncGoogleOauthClientIdFromBackend();
 
         chrome.runtime.onMessage.addListener((request) => {
             if (request.action === 'toggle_ui' || request.action === 'open_ui' || request.action === 'hotkey_toggle_ui') {
@@ -2366,7 +2975,7 @@
             }
         });
 
-        chrome.storage.local.get([AUTH_SESSION_KEY, 'screenchat_user', 'conversationHistory', 'messageCount', 'sessionDomain', ATTACH_SCREEN_KEY, PROFILE_NUDGE_OPT_OUT_KEY], (result) => {
+        chrome.storage.local.get([AUTH_SESSION_KEY, 'screenchat_user', CONVERSATION_HISTORY_KEY, SESSION_STATE_KEY, 'messageCount', LEGACY_SESSION_DOMAIN_KEY, ATTACH_SCREEN_KEY, PROFILE_NUDGE_OPT_OUT_KEY], (result) => {
             const currentDomain = window.location.hostname;
             profileNudgeOptOut = !!result[PROFILE_NUDGE_OPT_OUT_KEY];
             if (typeof result[ATTACH_SCREEN_KEY] === 'boolean') {
@@ -2377,16 +2986,26 @@
 
             const storedAuthSession = normalizeStoredAuthSession(result[AUTH_SESSION_KEY]);
             const hasStoredAuthSession = !!storedAuthSession;
+            const storedSessionState = normalizeStoredSessionState(result[SESSION_STATE_KEY]);
+            const storedConversationHistory = normalizeConversationHistory(result[CONVERSATION_HISTORY_KEY]);
             // Stored session must be re-validated with backend before UI treats it as signed in.
             setAuthSession(storedAuthSession, { persist: false, verified: false });
             isAuthRestoreInFlight = hasStoredAuthSession;
-            chrome.storage.local.set({ sessionDomain: currentDomain });
+            if (storedSessionState?.sessionId) {
+                sessionId = storedSessionState.sessionId;
+            }
+            if (storedSessionState?.sessionUrl) {
+                sessionUrl = storedSessionState.sessionUrl;
+            }
+            if (storedSessionState?.updatedAt) {
+                sessionUpdatedAt = storedSessionState.updatedAt;
+            }
 
             if (result.screenchat_user || result.messageCount) {
                 chrome.storage.local.remove(['screenchat_user', 'messageCount']);
             }
 
-            if (result.sessionDomain && result.sessionDomain !== currentDomain) {
+            if ((storedSessionState?.sessionDomain || result[LEGACY_SESSION_DOMAIN_KEY]) && (storedSessionState?.sessionDomain || result[LEGACY_SESSION_DOMAIN_KEY]) !== currentDomain) {
                 startNewSession(false, false);
             }
 
@@ -2396,16 +3015,16 @@
             const canUseStoredSessionData = isAuthenticated() || hasStoredAuthSession;
 
             if (canHydrateConversation) {
-                if (canUseStoredSessionData && result.conversationHistory && result.conversationHistory.length > 0 && (!result.sessionDomain || result.sessionDomain === currentDomain)) {
-                    conversationHistory = result.conversationHistory;
-                    if (messagesArea) {
-                        messagesArea.innerHTML = '';
-                        conversationHistory.forEach((msg) => {
-                            const role = msg?.role === 'user' ? 'user' : 'ai';
-                            const content = typeof msg?.content === 'string' ? msg.content : String(msg?.content ?? '');
-                            addMessage(content, role, null, true, msg?.timestamp);
-                        });
-                    }
+                const storedSessionDomain = storedSessionState?.sessionDomain || result[LEGACY_SESSION_DOMAIN_KEY];
+                if (canUseStoredSessionData && storedConversationHistory.length > 0 && (!storedSessionDomain || storedSessionDomain === currentDomain)) {
+                    applyConversationState({
+                        sessionId: storedSessionState?.sessionId,
+                        sessionUrl: storedSessionState?.sessionUrl,
+                        history: storedConversationHistory,
+                        updatedAt: storedSessionState?.updatedAt,
+                        persist: false,
+                        withTypewriter: false
+                    });
                 } else if (canUseStoredSessionData) {
                     renderWelcomeMessage(true);
                 } else if (messagesArea) {
@@ -2430,22 +3049,6 @@
 
             (async () => {
                 try {
-                    // Best effort: refresh token silently so persisted sessions survive token expiry.
-                    try {
-                        const silentTokenResponse = await chrome.runtime.sendMessage({ action: 'google_get_token_silent' });
-                        const silentToken = isNonEmptyString(silentTokenResponse?.authToken)
-                            ? silentTokenResponse.authToken.trim()
-                            : '';
-                        if (silentTokenResponse?.ok && silentToken) {
-                            setAuthSession({
-                                authToken: silentToken,
-                                user: storedAuthSession.user
-                            }, { verified: false });
-                        }
-                    } catch {
-                        // Continue with stored token if silent refresh is unavailable.
-                    }
-
                     const response = await apiFetch('/api/auth/me');
                     if (!response.ok) {
                         if (isUnauthorizedResponse(response)) {
@@ -2464,6 +3067,7 @@
 
                     setAuthSession({
                         authToken: getAuthToken(),
+                        refreshToken: getRefreshToken(),
                         user: {
                             id: user.id,
                             email: user.email || '',
@@ -2472,6 +3076,7 @@
                             emailVerified: !!user.emailVerified
                         }
                     });
+                    await syncLatestHistoryIntoChat();
                 } catch (error) {
                     console.warn('[Auth] Stored session validation failed:', error);
                     requireAuthenticationUi('Please sign in with Google to continue.');
@@ -2560,12 +3165,12 @@
                             </span>
                             <span class="sc-prompt-chip">/takeaways</span>
                         </button>
-                        <button class="sc-prompt-btn" data-prompt="What should I do next based on this page?">
+                        <button class="sc-prompt-btn" data-prompt="What should I understand next about this page?">
                             <span class="sc-prompt-main">
                                 <span class="sc-prompt-emoji" aria-hidden="true">🧭</span>
-                                <span class="sc-prompt-title">What should I do next?</span>
+                                <span class="sc-prompt-title">What should I understand next?</span>
                             </span>
-                            <span class="sc-prompt-chip">/next</span>
+                            <span class="sc-prompt-chip">/focus</span>
                         </button>
                     </div>
                     <div class="sc-hotkey-hint" id="sc-hotkey-hint"></div>
@@ -2616,7 +3221,7 @@
                                 <p class="sc-account-email" id="sc-account-email"></p>
                             </div>
                         </div>
-                        <p class="sc-profile-desc">Optional personalization details for how ScreenChat should use your information in responses. This does not change your main Google account information.</p>
+                        <p class="sc-profile-desc">Your full name and email are imported from your Google account and saved to your ScreenChat profile. You can edit them here for how ScreenChat uses your information in responses. This does not change your main Google account information.</p>
                         <div class="sc-profile-field">
                             <label for="sc-profile-name">Full Name</label>
                             <input type="text" id="sc-profile-name" placeholder="John Doe">
@@ -2708,6 +3313,26 @@
         const quickPromptButtons = shadowRoot.querySelectorAll('.sc-prompt-btn');
         setupPanelPointerInteractions();
 
+        function syncProfileState(profile) {
+            const storedProfile = profile && typeof profile === 'object' && !Array.isArray(profile)
+                ? profile
+                : null;
+
+            userProfile = applyProfileFormValues({
+                profileNameInput,
+                profileNicknameInput,
+                profileEmailInput,
+                profilePhoneInput,
+                profileNotesInput
+            }, storedProfile);
+
+            if (storedProfile && hasAnyProfileValue(userProfile)) {
+                setProfileNudgeOptOut(true);
+            }
+
+            return userProfile;
+        }
+
         function setGoogleSignInState(loading) {
             if (!googleSignInBtn) return;
             googleSignInBtn.disabled = !!loading;
@@ -2776,6 +3401,7 @@
 
                 setAuthSession({
                     authToken: getAuthToken(),
+                    refreshToken: getRefreshToken(),
                     user: {
                         id: user.id,
                         email: user.email || '',
@@ -2784,6 +3410,10 @@
                         emailVerified: !!user.emailVerified
                     }
                 });
+                syncProfileState(payload?.profile);
+                profileLoadAttempted = true;
+                refreshProfileNudgeVisibility();
+                await syncLatestHistoryIntoChat();
                 syncAuthUi();
                 setAuthStatus('');
                 return true;
@@ -2800,45 +3430,13 @@
             setAuthStatus('Opening Google sign-in...', false);
 
             try {
-                const oauthResponse = await chrome.runtime.sendMessage({ action: 'google_sign_in' });
-                const authToken = isNonEmptyString(oauthResponse?.authToken)
-                    ? oauthResponse.authToken.trim()
-                    : (isNonEmptyString(oauthResponse?.idToken) ? oauthResponse.idToken.trim() : '');
-                if (!oauthResponse?.ok || !authToken) {
-                    throw new Error(oauthResponse?.error || 'Google sign-in failed');
-                }
-
-                const verifyResponse = await apiFetch('/api/auth/google', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ token: authToken })
-                }, { includeAuth: false });
-
-                if (!verifyResponse.ok) {
-                    const backendMessage = await getApiErrorMessage(verifyResponse, 'Google authentication failed');
-                    throw new Error(backendMessage);
-                }
-
-                const authPayload = await verifyResponse.json();
-                const user = authPayload?.user;
-                if (!user?.id) {
-                    throw new Error('Google authentication failed');
-                }
-
-                setAuthSession({
-                    authToken,
-                    user: {
-                        id: user.id,
-                        email: user.email || '',
-                        fullName: user.fullName || '',
-                        picture: user.picture || '',
-                        emailVerified: !!user.emailVerified
-                    }
-                });
+                const nextSession = await beginHostedGoogleSignIn();
+                setAuthSession(nextSession);
 
                 setAuthStatus('');
                 syncAuthUi();
 
+                await syncLatestHistoryIntoChat({ force: !conversationHistory.length });
                 if (!conversationHistory.length) {
                     renderWelcomeMessage(true);
                 }
@@ -2946,26 +3544,7 @@
                 }
 
                 const data = await response.json();
-                if (data.profile && typeof data.profile === 'object' && !Array.isArray(data.profile)) {
-                    userProfile = applyProfileFormValues({
-                        profileNameInput,
-                        profileNicknameInput,
-                        profileEmailInput,
-                        profilePhoneInput,
-                        profileNotesInput
-                    }, data.profile);
-                    if (hasAnyProfileValue(userProfile)) {
-                        setProfileNudgeOptOut(true);
-                    }
-                } else {
-                    userProfile = applyProfileFormValues({
-                        profileNameInput,
-                        profileNicknameInput,
-                        profileEmailInput,
-                        profilePhoneInput,
-                        profileNotesInput
-                    }, null);
-                }
+                syncProfileState(data?.profile);
             } catch (e) {
                 console.error('[Profile] Load error:', e);
             } finally {
@@ -2975,7 +3554,7 @@
         }
 
         setTimeout(() => {
-            if (isAuthenticated()) {
+            if (isAuthenticated() && !profileLoadAttempted) {
                 loadProfile();
             }
         }, 500);
@@ -3014,10 +3593,9 @@
 
                     const data = await response.json();
                     if (data.success) {
-                        userProfile = profile;
-                        if (hasAnyProfileValue(profile)) {
-                            setProfileNudgeOptOut(true);
-                        }
+                        syncProfileState(data?.profile || profile);
+                        profileLoadAttempted = true;
+                        refreshProfileNudgeVisibility();
                         profileSaveBtn.textContent = 'Saved';
                         setTimeout(() => {
                             profileSaveBtn.textContent = 'Save Profile';
@@ -3056,21 +3634,12 @@
                 if (profileSaveBtn) profileSaveBtn.disabled = true;
 
                 try {
-                    const signOutResponse = await chrome.runtime.sendMessage({
-                        action: 'google_sign_out',
-                        authToken: getAuthToken()
-                    });
-
-                    if (!signOutResponse?.ok) {
-                        throw new Error(signOutResponse?.error || 'Google sign-out failed');
-                    }
-
                     clearAuthSession();
                     userProfile = null;
                     profileLoadAttempted = false;
                     hasLocalConversationMutation = false;
                     conversationHistory = [];
-                    chrome.storage.local.remove(['conversationHistory']);
+                    clearPersistedConversationState();
 
                     if (profileNameInput) profileNameInput.value = '';
                     if (profileNicknameInput) profileNicknameInput.value = '';
@@ -3130,9 +3699,14 @@
                         const item = document.createElement('div');
                         item.className = 'sc-history-item';
                         const dateStr = session.updatedAt ? new Date(session.updatedAt).toLocaleString() : 'Unknown date';
+                        const locationLabel = formatHistoryLocation(session.url);
+                        const deviceLabel = isNonEmptyString(session.deviceLabel) ? session.deviceLabel.trim() : 'Saved device';
+                        const previewLabel = formatHistoryPreview(session);
                         item.innerHTML = `
                             <div class="sc-history-info">
-                                <span class="sc-history-domain">${session.url || 'Unknown URL'}</span>
+                                <span class="sc-history-domain">${escapeHtml(locationLabel)}</span>
+                                <span class="sc-history-device">${escapeHtml(deviceLabel)}</span>
+                                <span class="sc-history-preview">${escapeHtml(previewLabel)}</span>
                                 <span class="sc-history-date">${dateStr}</span>
                             </div>
                             <button class="sc-history-open" title="Open Conversation">Open</button>
@@ -3173,27 +3747,14 @@
                 const data = await response.json();
 
                 if (data.history) {
-                    sessionId = sid;
-                    sessionUrl = url || 'restored_session';
-                    conversationHistory = data.history;
-
-                    messagesArea.innerHTML = '';
-                    conversationHistory.forEach((msg) => {
-                        const content = msg.role === 'user' ? cleanUserMessage(msg.content) : cleanAiReply(msg.content);
-                        const resolvedTimestampMs = parseTimestampMs(msg?.timestamp ?? fallbackTimestamp);
-                        if (!msg?.timestamp && resolvedTimestampMs !== null && msg && typeof msg === 'object') {
-                            msg.timestamp = new Date(resolvedTimestampMs).toISOString();
-                        }
-                        if (content && content.toLowerCase() !== 'continue') {
-                            addMessage(content, msg.role === 'user' ? 'user' : 'ai', null, true, msg?.timestamp ?? fallbackTimestamp);
-                        }
+                    applyConversationState({
+                        sessionId: data?.session?.id || sid,
+                        sessionUrl: data?.session?.url || url || 'restored_session',
+                        history: data.history,
+                        updatedAt: data?.session?.updatedAt || fallbackTimestamp,
+                        persist: true,
+                        withTypewriter: false
                     });
-
-                    chrome.storage.local.set({
-                        conversationHistory,
-                        sessionDomain: window.location.hostname
-                    });
-
                     openPane('chat');
                 }
             } catch (e) {
@@ -3244,7 +3805,8 @@
             addMessage(text, 'user', null, false, userMessageTimestamp);
 
             conversationHistory.push({ role: 'user', content: text, timestamp: userMessageTimestamp });
-            chrome.storage.local.set({ conversationHistory });
+            sessionUpdatedAt = userMessageTimestamp;
+            persistConversationState({ updatedAt: userMessageTimestamp });
             syncQuickPromptsVisibility();
 
             isAwaitingResponse = true;
@@ -3283,14 +3845,15 @@
 
             try {
                 const messagesPayload = conversationHistory.map((msg) => {
-                    if (msg?.role === 'user') {
+                    const normalizedRole = normalizeConversationRole(msg?.role);
+                    if (normalizedRole === 'user') {
                         return {
                             role: 'user',
                             content: cleanUserMessage(msg.content),
                             timestamp: msg.timestamp
                         };
                     }
-                    if (msg?.role === 'assistant') {
+                    if (normalizedRole === 'assistant') {
                         return {
                             role: 'assistant',
                             content: cleanAiReply(msg.content),
@@ -3299,8 +3862,9 @@
                     }
                     return msg;
                 });
-                sessionUrl = window.location.href || sessionUrl;
-                const activeTabUrl = sessionUrl;
+                const activeTabUrl = await getActiveTabUrl();
+                sessionUrl = activeTabUrl || window.location.href || sessionUrl;
+                const messagesWithPageContext = attachCurrentPageUrlContext(messagesPayload, sessionUrl);
 
                 let attachedImage = null;
                 if (attachScreenEnabled) {
@@ -3317,13 +3881,13 @@
                 currentAbortController = new AbortController();
 
                 const chatPayload = {
-                    messages: messagesPayload,
+                    messages: messagesWithPageContext,
                     sessionId,
                     sessionUrl,
                     activeTabUrl,
-                    mode: chatMode,
                     profile: userProfile,
-                    image: attachedImage
+                    image: attachedImage,
+                    clientContext: buildClientContext()
                 };
 
                 const responseText = await Promise.race([
@@ -3368,7 +3932,8 @@
                     content: responseText,
                     timestamp: assistantMessageTimestamp
                 });
-                chrome.storage.local.set({ conversationHistory });
+                sessionUpdatedAt = assistantMessageTimestamp;
+                persistConversationState({ updatedAt: assistantMessageTimestamp });
                 isAwaitingResponse = false;
                 setInputState(true);
                 syncQuickPromptsVisibility();
@@ -3388,7 +3953,7 @@
                     if (requestTimedOut) {
                         addMessage(`Request timed out after ${Math.floor(CHAT_REQUEST_TIMEOUT_MS / 1000)} seconds. Please try again.`, 'ai');
                         conversationHistory.pop();
-                        chrome.storage.local.set({ conversationHistory });
+                        persistConversationState({ updatedAt: getLatestConversationTimestamp(conversationHistory) });
                     }
                     syncQuickPromptsVisibility();
                     return;
@@ -3401,16 +3966,16 @@
                     requireAuthenticationUi('Session expired. Please sign in again.');
                     addMessage('Your session expired. Sign in with Google to continue.', 'ai');
                     conversationHistory.pop();
-                    chrome.storage.local.set({ conversationHistory });
+                    persistConversationState({ updatedAt: getLatestConversationTimestamp(conversationHistory) });
                     syncQuickPromptsVisibility();
                     return;
                 }
                 const userError = backendMessage === 'Failed to fetch'
-                    ? 'Unable to reach ScreenChat backend. Confirm the backend is running, then reload the extension.'
+                    ? getUnreachableBackendMessage()
                     : `Request failed: ${backendMessage}`;
                 addMessage(userError, 'ai');
                 conversationHistory.pop();
-                chrome.storage.local.set({ conversationHistory });
+                persistConversationState({ updatedAt: getLatestConversationTimestamp(conversationHistory) });
                 syncQuickPromptsVisibility();
             }
         };
@@ -3651,7 +4216,10 @@
         const attachmentHtml = imageUrl
             ? `<div class="sc-attachment"><img src="${imageUrl}" alt="Screenshot"></div>`
             : '';
-        const formattedText = formatMessageContent(typeof text === 'string' ? text : String(text ?? ''));
+        const normalizedText = messageEl.classList.contains('ai')
+            ? cleanAiReply(text)
+            : (typeof text === 'string' ? text : String(text ?? ''));
+        const formattedText = formatMessageContent(normalizedText);
         bubble.innerHTML = `${formattedText}${attachmentHtml}`;
 
         const messagesArea = shadowRoot?.getElementById('sc-messages');
@@ -4196,7 +4764,6 @@
     // Builds context based on what the AI needs, not just dumping everything
     async function buildAdaptiveContext(options = {}) {
         const {
-            includeDOM = true,
             includeForms = true,
             includeScrollable = true
         } = options;
@@ -4204,8 +4771,7 @@
         const context = {
             url: window.location.href,
             activeTabUrl: await getActiveTabUrl(),
-            title: document.title,
-            htmlSnapshot: null
+            title: document.title
         };
 
         // Detect active context first
@@ -4215,11 +4781,6 @@
             description: activeContext.description,
             selector: activeContext.containerSelector
         };
-
-        // DOM structure
-        if (includeDOM) {
-            context.domStructure = extractDOMStructure(activeContext);
-        }
 
         // Form fields
         if (includeForms) {
@@ -4233,11 +4794,6 @@
 
         // Page state for change detection
         context.pageState = getPageStateSignature();
-
-        // DOM Snapshot (Cleaned HTML)
-        if (includeDOM) {
-            context.htmlSnapshot = getCleanedHTML(activeContext.container || document.body);
-        }
 
         return context;
     }

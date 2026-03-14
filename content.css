@@ -543,9 +543,9 @@
 .sc-quick-prompts {
     display: flex;
     flex-direction: column;
-    gap: 3px;
-    padding: 8px 12px 2px;
-    margin-bottom: 34px;
+    gap: 1px;
+    padding: 4px 12px 0;
+    margin-bottom: 24px;
     border-bottom: none;
     background: transparent;
 }
@@ -601,43 +601,45 @@
     background: transparent;
     color: #2f3438;
     border-radius: 0;
-    min-height: 44px;
-    padding: 8px 2px;
-    font-size: 14px;
+    min-height: 36px;
+    padding: 5px 2px;
+    font-size: 13px;
     font-weight: 500;
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 10px;
+    gap: 8px;
     text-align: left;
-    transition: background var(--sc-dur-fast) var(--sc-ease), color var(--sc-dur-fast) var(--sc-ease);
+    transition:
+        background var(--sc-dur-fast) var(--sc-ease),
+        color var(--sc-dur-fast) var(--sc-ease);
 }
 
 .sc-prompt-btn:hover {
-    color: #252a2e;
-    background: rgba(97, 152, 142, 0.05);
+    color: #2f3438;
+    background: rgba(97, 152, 142, 0.035);
 }
 
 .sc-prompt-main {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
     min-width: 0;
 }
 
 .sc-prompt-emoji {
-    font-size: 18px;
-    width: 24px;
+    font-size: 14px;
+    width: 18px;
     text-align: center;
     flex-shrink: 0;
     opacity: 0.9;
 }
 
 .sc-prompt-title {
-    font-size: 16px;
+    font-size: 14px;
     font-weight: 500;
-    color: #2f3438;
+    color: inherit;
     line-height: 1.25;
     white-space: nowrap;
     overflow: hidden;
@@ -649,12 +651,12 @@
     color: #2b4048;
     background: #f7fcfe;
     border-radius: 999px;
-    min-height: 34px;
-    padding: 0 12px;
+    min-height: 26px;
+    padding: 0 10px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    font-size: 14px;
+    font-size: 12px;
     font-weight: 500;
     letter-spacing: 0.01em;
     flex-shrink: 0;
@@ -1284,7 +1286,7 @@
 
 .sc-history-item {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
     gap: 12px;
     border: 1px solid var(--sc-border-soft);
@@ -1310,6 +1312,22 @@
     text-overflow: ellipsis;
 }
 
+.sc-history-device {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--sc-accent-press);
+}
+
+.sc-history-preview {
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--sc-ink-600);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
 .sc-history-date {
     font-size: 11px;
     color: var(--sc-ink-500);
@@ -1325,6 +1343,7 @@
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
+    flex-shrink: 0;
 }
 
 .sc-history-open:hover {
@@ -1608,18 +1627,6 @@
 
 .sc-typewriter-target {
     display: inline-block;
-}
-
-.sc-typewriter-target.typing {
-    border-right: 1px solid var(--sc-ink-500);
-    padding-right: 2px;
-    animation: sc-caret 800ms steps(1) infinite;
-}
-
-@keyframes sc-caret {
-    50% {
-        border-right-color: transparent;
-    }
 }
 
 .sc-pane-auth {

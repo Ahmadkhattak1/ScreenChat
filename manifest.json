@@ -1,25 +1,16 @@
 {
     "manifest_version": 3,
     "name": "ScreenChat - AI Chat for Your Browser",
-    "version": "1.0.0",
+    "short_name": "ScreenChat",
+    "version": "1.0.4",
     "description": "Chat with your screen. AI chat that sees your page and helps answer questions.",
     "permissions": [
         "activeTab",
         "storage",
-        "scripting",
-        "identity"
+        "scripting"
     ],
-    "host_permissions": [
-        "https://screenchat-backend-production.up.railway.app/*"
-    ],
-    "oauth2": {
-        "client_id": "664186125970-m02q4pu5g6v4tf7mo1gg9h1mvslaergn.apps.googleusercontent.com",
-        "scopes": [
-            "https://www.googleapis.com/auth/userinfo.email",
-            "https://www.googleapis.com/auth/userinfo.profile"
-        ]
-    },
     "action": {
+        "default_title": "Open ScreenChat",
         "default_icon": {
             "16": "icons/icon16.png",
             "32": "icons/icon32.png",
@@ -49,7 +40,8 @@
         {
             "resources": [
                 "content.css",
-                "icons/*"
+                "icons/*",
+                "runtime-config.json"
             ],
             "matches": [
                 "<all_urls>"

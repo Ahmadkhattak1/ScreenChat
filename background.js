@@ -4,15 +4,11 @@ chrome.runtime.onInstalled.addListener(() => {
     console.log('ScreenChat extension installed');
 });
 
-const ALLOWED_API_ORIGINS = new Set([
-    'https://screenchat-backend-production.up.railway.app'
-]);
-const GOOGLE_AUTH_SCOPES = [
-    'https://www.googleapis.com/auth/userinfo.email',
-    'https://www.googleapis.com/auth/userinfo.profile'
-];
-const HOTKEY_DEBUG_ENABLED = true;
+const RUNTIME_CONFIG_URL = chrome.runtime.getURL('runtime-config.json');
+const HOTKEY_DEBUG_ENABLED = false;
 let hotkeyRequestCounter = 0;
+let runtimeConfigLoadPromise = null;
+let allowedApiOrigins = new Set();
 
 function hotkeyLog(event, details = {}) {
     if (!HOTKEY_DEBUG_ENABLED) return;
@@ -22,107 +18,99 @@ function hotkeyLog(event, details = {}) {
     });
 }
 
-function isAllowedApiRequestUrl(rawUrl = '') {
-    try {
-        const parsed = new URL(rawUrl);
-        return ALLOWED_API_ORIGINS.has(parsed.origin);
-    } catch {
-        return false;
-    }
+function isPrivateIpv4Address(hostname = '') {
+    const parts = hostname.split('.');
+    if (parts.length !== 4) return false;
+    const octets = parts.map((part) => Number(part));
+    if (octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return false;
+
+    if (octets[0] === 10) return true;
+    if (octets[0] === 127) return true;
+    if (octets[0] === 169 && octets[1] === 254) return true;
+    if (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) return true;
+    if (octets[0] === 192 && octets[1] === 168) return true;
+
+    return false;
 }
 
-function isNonEmptyString(value) {
-    return typeof value === 'string' && value.trim().length > 0;
-}
-
-function extractGoogleAuthToken(result) {
-    if (typeof result === 'string') {
-        return result.trim();
-    }
-
-    if (result && typeof result === 'object' && typeof result.token === 'string') {
-        return result.token.trim();
-    }
-
-    return '';
-}
-
-function isGoogleSignInCanceledError(error) {
-    const message = String(error?.message || '').toLowerCase();
+function isLocalNetworkHostname(hostname = '') {
+    const normalized = String(hostname || '').trim().toLowerCase();
+    if (!normalized) return false;
     return (
-        message.includes('user did not approve') ||
-        message.includes('user cancelled') ||
-        message.includes('user canceled') ||
-        message.includes('user closed') ||
-        message.includes('access denied')
+        normalized === 'localhost' ||
+        normalized === '0.0.0.0' ||
+        normalized === '::1' ||
+        normalized === '[::1]' ||
+        normalized.endsWith('.local') ||
+        isPrivateIpv4Address(normalized)
     );
 }
 
-async function revokeGoogleAccessToken(token) {
-    const trimmed = isNonEmptyString(token) ? token.trim() : '';
-    if (!trimmed) return;
+function isLoopbackHostname(hostname = '') {
+    const normalized = String(hostname || '').trim().toLowerCase();
+    return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1' || normalized === '[::1]';
+}
+
+function isAllowedConfiguredApiOrigin(parsed) {
+    if (!parsed) return false;
+    if (parsed.protocol === 'https:') {
+        return !isLocalNetworkHostname(parsed.hostname) || isLoopbackHostname(parsed.hostname);
+    }
+    return parsed.protocol === 'http:' && isLoopbackHostname(parsed.hostname);
+}
+
+function normalizeConfiguredApiBaseUrl(rawValue) {
+    if (typeof rawValue !== 'string') return null;
+    const trimmed = rawValue.trim();
+    if (!trimmed) return null;
+
     try {
-        await fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(trimmed)}`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded'
+        const parsed = new URL(trimmed.replace(/\/+$/, ''));
+        if (!isAllowedConfiguredApiOrigin(parsed)) {
+            return null;
+        }
+        return parsed.origin;
+    } catch {
+        return null;
+    }
+}
+
+async function ensureRuntimeConfigLoaded() {
+    if (allowedApiOrigins.size > 0) return;
+    if (!runtimeConfigLoadPromise) {
+        runtimeConfigLoadPromise = (async () => {
+            const response = await fetch(RUNTIME_CONFIG_URL, { cache: 'no-store' });
+            if (!response.ok) {
+                throw new Error('Failed to load extension runtime config');
             }
+
+            const payload = await response.json().catch(() => null);
+            const configuredCandidates = Array.isArray(payload?.apiBaseCandidates)
+                ? payload.apiBaseCandidates
+                : (typeof payload?.apiBaseUrl === 'string' ? [payload.apiBaseUrl] : []);
+            const normalizedOrigins = configuredCandidates
+                .map((candidate) => normalizeConfiguredApiBaseUrl(candidate))
+                .filter(Boolean);
+
+            if (!normalizedOrigins.length) {
+                throw new Error('No valid backend URL configured for ScreenChat');
+            }
+
+            allowedApiOrigins = new Set(normalizedOrigins);
+        })().catch((error) => {
+            runtimeConfigLoadPromise = null;
+            throw error;
         });
-    } catch (error) {
-        console.warn('Failed to revoke Google access token:', error);
     }
+    return runtimeConfigLoadPromise;
 }
 
-async function clearCachedGoogleAuthTokens(token = '') {
-    const trimmed = isNonEmptyString(token) ? token.trim() : '';
-    if (trimmed) {
-        try {
-            await chrome.identity.removeCachedAuthToken({ token: trimmed });
-        } catch (removeError) {
-            console.warn('Failed to remove cached Google auth token:', removeError);
-        }
-    }
-    await chrome.identity.clearAllCachedAuthTokens();
-}
-
-async function requestGoogleAuthToken({ interactive = false } = {}) {
-    const result = await chrome.identity.getAuthToken({
-        interactive: !!interactive,
-        scopes: GOOGLE_AUTH_SCOPES,
-        enableGranularPermissions: true
-    });
-    const authToken = extractGoogleAuthToken(result);
-    if (!authToken) {
-        throw new Error('Google sign-in did not return an access token');
-    }
-    return authToken;
-}
-
-async function runGoogleSignInFlow() {
+function isAllowedApiRequestUrl(rawUrl = '') {
     try {
-        try {
-            const authToken = await requestGoogleAuthToken({ interactive: false });
-            return { authToken };
-        } catch {
-            // No silently available token; continue with interactive sign-in.
-        }
-
-        const authToken = await requestGoogleAuthToken({ interactive: true });
-        return { authToken };
-    } catch (error) {
-        if (isGoogleSignInCanceledError(error)) {
-            throw new Error('Google sign-in was canceled.');
-        }
-        throw new Error(error?.message || 'Google sign-in failed');
-    }
-}
-
-async function runGoogleSilentTokenRefresh() {
-    try {
-        const authToken = await requestGoogleAuthToken({ interactive: false });
-        return { authToken };
-    } catch (error) {
-        throw new Error(error?.message || 'No Google token available');
+        const parsed = new URL(rawUrl);
+        return allowedApiOrigins.has(parsed.origin);
+    } catch {
+        return false;
     }
 }
 
@@ -143,6 +131,7 @@ function buildProxyRequestConfig(payload) {
 }
 
 async function proxyApiFetch(message) {
+    await ensureRuntimeConfigLoaded();
     const { requestUrl, method, headers, body } = buildProxyRequestConfig(message);
 
     const response = await fetch(requestUrl, { method, headers, body });
@@ -162,6 +151,7 @@ async function proxyApiFetch(message) {
 }
 
 async function proxyApiStream(port, payload, abortController) {
+    await ensureRuntimeConfigLoaded();
     const { requestUrl, method, headers, body } = buildProxyRequestConfig(payload);
     const response = await fetch(requestUrl, {
         method,
@@ -264,37 +254,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const supportedActions = new Set([
         'capture_visible_tab',
         'get_active_tab_url',
-        'proxy_api_fetch',
-        'google_sign_in',
-        'google_sign_out',
-        'google_get_token_silent'
+        'proxy_api_fetch'
     ]);
     if (!supportedActions.has(action)) return undefined;
 
     (async () => {
         try {
-            if (action === 'google_sign_in') {
-                const result = await runGoogleSignInFlow();
-                sendResponse({ ok: true, ...result });
-                return;
-            }
-
-            if (action === 'google_sign_out') {
-                const authToken = typeof message?.authToken === 'string' ? message.authToken.trim() : '';
-                if (authToken) {
-                    await revokeGoogleAccessToken(authToken);
-                }
-                await clearCachedGoogleAuthTokens(authToken);
-                sendResponse({ ok: true });
-                return;
-            }
-
-            if (action === 'google_get_token_silent') {
-                const result = await runGoogleSilentTokenRefresh();
-                sendResponse({ ok: true, ...result });
-                return;
-            }
-
             if (action === 'capture_visible_tab') {
                 const windowId = sender?.tab?.windowId;
                 const image = await chrome.tabs.captureVisibleTab(windowId, { format: 'png' });
@@ -308,23 +273,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 return;
             }
 
-            if (typeof sender?.tab?.url === 'string' && sender.tab.url.trim()) {
-                sendResponse({ ok: true, url: sender.tab.url });
-                return;
-            }
-
-            const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-            sendResponse({ ok: true, url: activeTab?.url || null });
+            const senderTabUrl = typeof sender?.tab?.url === 'string' && sender.tab.url.trim()
+                ? sender.tab.url.trim()
+                : null;
+            sendResponse({ ok: true, url: senderTabUrl });
         } catch (error) {
-            if (action === 'google_get_token_silent') {
-                sendResponse({ ok: false, error: error?.message || 'No Google token available' });
-                return;
-            }
-            if (action === 'google_sign_in' || action === 'google_sign_out') {
-                console.warn('Google auth flow failed:', error);
-                sendResponse({ ok: false, error: error?.message || 'Google authentication failed' });
-                return;
-            }
             if (action === 'capture_visible_tab') {
                 console.error('Screen capture failed:', error);
                 sendResponse({ ok: false, error: 'Unable to capture current screen' });
@@ -337,7 +290,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             }
 
             console.warn('Active tab URL lookup failed:', error);
-            sendResponse({ ok: false, url: sender?.tab?.url || null });
+            sendResponse({
+                ok: false,
+                url: typeof sender?.tab?.url === 'string' && sender.tab.url.trim()
+                    ? sender.tab.url.trim()
+                    : null
+            });
         }
     })();
 
