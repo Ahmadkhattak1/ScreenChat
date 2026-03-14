@@ -41,6 +41,7 @@
             "resources": [
                 "content.css",
                 "icons/*",
+                "icons/svgs/*",
                 "runtime-config.json"
             ],
             "matches": [

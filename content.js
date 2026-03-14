@@ -14,6 +14,7 @@
     let hasLocalConversationMutation = false;
     // User Profile (personal info for personalization)
     let userProfile = null;
+    const DEFAULT_WELCOME_MESSAGE = 'How can I help with this page? What would you like to ask about it?';
 
     // Session State
     let sessionId = createSessionId();
@@ -25,6 +26,8 @@
     const CONVERSATION_HISTORY_KEY = 'conversationHistory';
     const SESSION_STATE_KEY = 'screenchat_session_state';
     const LEGACY_SESSION_DOMAIN_KEY = 'sessionDomain';
+    const PROFILE_CACHE_KEY = 'screenchat_profile_identity';
+    const PROFILE_LOCAL_STORAGE_KEY = 'screenchat_profile_identity';
     let authState = 'ANONYMOUS'; // ANONYMOUS | AUTHENTICATED
     let authSession = null;
     let isAuthSessionVerified = false;
@@ -124,26 +127,6 @@
             if (entryTimestamp) return entryTimestamp;
         }
         return null;
-    }
-
-    function normalizeStoredSessionState(rawState) {
-        if (!rawState || typeof rawState !== 'object' || Array.isArray(rawState)) return null;
-
-        const storedSessionId = isNonEmptyString(rawState.sessionId) ? rawState.sessionId.trim() : '';
-        const storedSessionUrl = isNonEmptyString(rawState.sessionUrl) ? rawState.sessionUrl.trim() : '';
-        const storedUpdatedAt = toIsoTimestamp(rawState.updatedAt);
-        const storedSessionDomain = isNonEmptyString(rawState.sessionDomain) ? rawState.sessionDomain.trim() : '';
-
-        if (!storedSessionId && !storedSessionUrl && !storedUpdatedAt && !storedSessionDomain) {
-            return null;
-        }
-
-        return {
-            sessionId: storedSessionId || createSessionId(),
-            sessionUrl: storedSessionUrl || window.location.href || window.location.hostname || 'unknown',
-            updatedAt: storedUpdatedAt,
-            sessionDomain: storedSessionDomain
-        };
     }
 
     function formatRelativeUnit(value, unit) {
@@ -365,17 +348,70 @@
             : '';
     }
 
+    function normalizeProfileIdentity(rawIdentity) {
+        if (!rawIdentity || typeof rawIdentity !== 'object' || Array.isArray(rawIdentity)) return null;
+
+        const fullName = isNonEmptyString(rawIdentity.fullName)
+            ? rawIdentity.fullName.trim()
+            : '';
+        const email = isNonEmptyString(rawIdentity.email)
+            ? rawIdentity.email.trim()
+            : '';
+
+        if (!fullName && !email) return null;
+
+        return { fullName, email };
+    }
+
+    function readProfileIdentityFromLocalStorage() {
+        try {
+            const storage = window.localStorage;
+            if (!storage) return null;
+            const rawValue = storage.getItem(PROFILE_LOCAL_STORAGE_KEY);
+            if (!isNonEmptyString(rawValue)) return null;
+            return normalizeProfileIdentity(JSON.parse(rawValue));
+        } catch {
+            return null;
+        }
+    }
+
+    function persistProfileIdentity(profileLike) {
+        const identity = normalizeProfileIdentity(profileLike);
+
+        try {
+            const storage = window.localStorage;
+            if (storage) {
+                if (identity) {
+                    storage.setItem(PROFILE_LOCAL_STORAGE_KEY, JSON.stringify(identity));
+                } else {
+                    storage.removeItem(PROFILE_LOCAL_STORAGE_KEY);
+                }
+            }
+        } catch {
+            // Ignore localStorage failures on restricted pages.
+        }
+
+        if (identity) {
+            chrome.storage.local.set({ [PROFILE_CACHE_KEY]: identity });
+        } else {
+            chrome.storage.local.remove([PROFILE_CACHE_KEY]);
+        }
+
+        return identity;
+    }
+
     function applyProfileFormValues(profileInputs, profile) {
         const hasStoredProfile = profile && typeof profile === 'object' && !Array.isArray(profile);
         const source = hasStoredProfile ? profile : {};
+        const cachedIdentity = readProfileIdentityFromLocalStorage();
         const accountFullName = getAccountFullName();
         const accountEmail = getAccountEmail();
         const resolvedFullName = hasStoredProfile
             ? (isNonEmptyString(source.fullName) ? source.fullName.trim() : '')
-            : accountFullName;
+            : (cachedIdentity?.fullName || accountFullName);
         const resolvedEmail = hasStoredProfile
             ? (isNonEmptyString(source.email) ? source.email.trim() : '')
-            : accountEmail;
+            : (cachedIdentity?.email || accountEmail);
 
         if (profileInputs.profileNameInput) profileInputs.profileNameInput.value = resolvedFullName;
         if (profileInputs.profileNicknameInput) profileInputs.profileNicknameInput.value = source.nickname || '';
@@ -544,6 +580,7 @@
             if (!content || content.toLowerCase() === 'continue') return;
             addMessage(content, role === 'user' ? 'user' : 'ai', null, true, timestamp);
         });
+        scrollMessagesToBottom({ force: true });
     }
 
     function applyConversationState({ sessionId: nextSessionId, sessionUrl: nextSessionUrl, history, updatedAt, persist = true, withTypewriter = false } = {}) {
@@ -620,6 +657,21 @@
         if (isNonEmptyString(session.lastUserMessage)) return session.lastUserMessage.trim();
         if (isNonEmptyString(session.lastAssistantMessage)) return session.lastAssistantMessage.trim();
         return 'Conversation saved in your ScreenChat history.';
+    }
+
+    function formatHistoryDate(timestamp) {
+        if (!isNonEmptyString(timestamp)) return 'Unknown date';
+        const parsed = new Date(timestamp);
+        if (Number.isNaN(parsed.getTime())) return 'Unknown date';
+        const day = String(parsed.getDate()).padStart(2, '0');
+        const month = parsed.toLocaleString(undefined, { month: 'long' });
+        const year = parsed.getFullYear();
+        const time = parsed.toLocaleString(undefined, {
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: true
+        });
+        return `${day} ${month} ${year} | ${time}`;
     }
 
     async function isBackendReachable(baseUrl) {
@@ -911,11 +963,6 @@
         }
     }
 
-    function getReplyTextFromPayload(payload) {
-        const rawReply = typeof payload?.reply === 'string' ? payload.reply : String(payload?.reply ?? '');
-        return cleanAiReply(rawReply);
-    }
-
     function createAbortError() {
         const error = new Error('Request aborted');
         error.name = 'AbortError';
@@ -1013,10 +1060,14 @@
 
     function parseStreamLine(line, onPartialText, state) {
         const trimmed = line.trim();
-        if (!trimmed) return;
+        if (!trimmed || trimmed.startsWith(':') || trimmed.startsWith('event:')) return;
+        const payload = trimmed.startsWith('data:')
+            ? trimmed.slice(5).trim()
+            : trimmed;
+        if (!payload || payload === '[DONE]') return;
         let event;
         try {
-            event = JSON.parse(trimmed);
+            event = JSON.parse(payload);
         } catch {
             return;
         }
@@ -1029,8 +1080,12 @@
             return;
         }
 
-        if (event?.type === 'done' && typeof event.reply === 'string') {
-            state.reply = event.reply;
+        if (event?.type === 'done') {
+            const finalReply = typeof event.reply === 'string'
+                ? event.reply
+                : extractStructuredReplyText(event);
+            if (!isNonEmptyString(finalReply)) return;
+            state.reply = finalReply;
             if (typeof onPartialText === 'function') {
                 onPartialText(cleanAiReply(state.reply));
             }
@@ -1197,35 +1252,45 @@
         });
     }
 
-    async function requestChatReplyStream(payload, { signal, onPartialText } = {}) {
-        return requestChatReplyStreamViaBackground(payload, { signal, onPartialText });
-    }
-
-    async function requestChatReply(payload, { signal, onPartialText } = {}) {
-        try {
-            return await requestChatReplyStream(payload, { signal, onPartialText });
-        } catch (streamError) {
-            if (streamError?.name === 'AbortError') throw streamError;
-            console.warn('[Chat] Streaming failed, falling back to JSON response:', streamError);
-        }
-
-        const response = await apiFetch('/api/chat', {
+    async function requestChatReplyStreamDirect(payload, { signal, onPartialText } = {}) {
+        const state = { reply: '', buffer: '' };
+        const requestOptions = {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
             signal
-        });
+        };
+
+        let response = await apiFetchDirect('/api/chat/stream', requestOptions);
+        if (isUnauthorizedResponse(response) && getRefreshToken()) {
+            const refreshedSession = await refreshAuthSession();
+            if (refreshedSession?.authToken) {
+                response = await apiFetchDirect('/api/chat/stream', requestOptions);
+            }
+        }
+
         if (!response.ok) {
             const errorMessage = await getApiErrorMessage(response, 'Backend failed');
             throw new Error(errorMessage);
         }
 
-        const data = await response.json();
-        const reply = getReplyTextFromPayload(data);
-        if (typeof onPartialText === 'function') {
-            onPartialText(reply);
+        await consumeNdjsonResponse(response, onPartialText, state);
+        return cleanAiReply(state.reply) || 'Sorry, I could not generate a response.';
+    }
+
+    async function requestChatReplyStream(payload, { signal, onPartialText } = {}) {
+        try {
+            return await requestChatReplyStreamDirect(payload, { signal, onPartialText });
+        } catch (directStreamError) {
+            if (directStreamError?.name === 'AbortError') throw directStreamError;
+            console.warn('[Chat] Direct stream failed, falling back to background stream:', directStreamError);
         }
-        return reply;
+
+        return requestChatReplyStreamViaBackground(payload, { signal, onPartialText });
+    }
+
+    async function requestChatReply(payload, { signal, onPartialText } = {}) {
+        return requestChatReplyStream(payload, { signal, onPartialText });
     }
 
     // =============================================================================
@@ -1781,14 +1846,18 @@
     const ATTACH_SCREEN_KEY = 'sc_attach_screen_enabled';
     const PROFILE_NUDGE_OPT_OUT_KEY = 'sc_profile_nudge_opt_out';
     const ATTACH_GLOW_OVERLAY_ID = 'sc-attach-glow-overlay';
-    const DEFAULT_PANEL_WIDTH = 372;
-    const DEFAULT_PANEL_HEIGHT = 590;
-    const PREVIOUS_DEFAULT_PANEL_WIDTH = 420;
-    const PREVIOUS_DEFAULT_PANEL_HEIGHT = 680;
-    const INTERMEDIATE_DEFAULT_PANEL_WIDTH = 388;
-    const INTERMEDIATE_DEFAULT_PANEL_HEIGHT = 620;
-    const MIN_PANEL_WIDTH = 324;
-    const MIN_PANEL_HEIGHT = 460;
+    const DEFAULT_PANEL_WIDTH = 382;
+    const DEFAULT_PANEL_HEIGHT = 684;
+    const PREVIOUS_DEFAULT_PANEL_WIDTH = 462;
+    const PREVIOUS_DEFAULT_PANEL_HEIGHT = 833;
+    const INTERMEDIATE_DEFAULT_PANEL_WIDTH = 420;
+    const INTERMEDIATE_DEFAULT_PANEL_HEIGHT = 680;
+    const LEGACY_PANEL_WIDTH = 388;
+    const LEGACY_PANEL_HEIGHT = 620;
+    const MIN_PANEL_WIDTH = 340;
+    const MIN_PANEL_HEIGHT = 560;
+    const MAX_PANEL_WIDTH = 420;
+    const MAX_PANEL_HEIGHT = 720;
     const DEFAULT_UI_STATE = {
         mode: 'hidden', // open | hidden
         side: 'right', // right | left
@@ -1807,6 +1876,11 @@
     const HOTKEY_REPEAT_GUARD_MS = 220;
     const HOTKEY_CROSS_SOURCE_GUARD_MS = 700;
     const HOTKEY_PAGE_FALLBACK_DELAY_MS = 340;
+    const CHAT_AUTO_SCROLL_THRESHOLD_PX = 48;
+    const ROUTED_WHEEL_SCROLL_EASING = 0.24;
+    const ROUTED_WHEEL_SCROLL_SETTLE_PX = 0.5;
+    const HEADER_REVEAL_CLASS = 'sc-header-entering';
+    const HEADER_REVEAL_DURATION_MS = 640;
     let lastHotkeyToggleAt = 0;
     let lastHotkeyToggleSource = '';
     let pendingPageHotkeyTimer = null;
@@ -1816,6 +1890,7 @@
     let profileNudgeOptOut = false;
     let profileNudgeSkippedThisSession = false;
     let profileLoadAttempted = false;
+    let headerRevealTimerId = null;
 
     function hotkeyLog(event, details = {}) {
         if (!HOTKEY_DEBUG_ENABLED) return;
@@ -1832,6 +1907,48 @@
         return Math.min(max, Math.max(min, value));
     }
 
+    function isElementNearScrollBottom(element, threshold = CHAT_AUTO_SCROLL_THRESHOLD_PX) {
+        if (!(element instanceof HTMLElement)) return false;
+        const remainingScroll = element.scrollHeight - element.clientHeight - element.scrollTop;
+        return remainingScroll <= threshold;
+    }
+
+    function scrollMessagesToBottom({ force = false } = {}) {
+        const messagesArea = shadowRoot?.getElementById('sc-messages');
+        if (!(messagesArea instanceof HTMLElement)) return false;
+        if (!force && !isElementNearScrollBottom(messagesArea)) return false;
+        messagesArea.scrollTop = messagesArea.scrollHeight;
+        return true;
+    }
+
+    function prefersReducedMotion() {
+        return typeof window.matchMedia === 'function'
+            && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    }
+
+    function clearHeaderRevealAnimation() {
+        if (headerRevealTimerId) {
+            clearTimeout(headerRevealTimerId);
+            headerRevealTimerId = null;
+        }
+        const panel = shadowRoot?.getElementById('sc-panel');
+        if (panel) {
+            panel.classList.remove(HEADER_REVEAL_CLASS);
+        }
+    }
+
+    function playHeaderRevealAnimation() {
+        const panel = shadowRoot?.getElementById('sc-panel');
+        clearHeaderRevealAnimation();
+        if (!(panel instanceof HTMLElement) || prefersReducedMotion()) return;
+        void panel.offsetWidth;
+        panel.classList.add(HEADER_REVEAL_CLASS);
+        headerRevealTimerId = setTimeout(() => {
+            panel.classList.remove(HEADER_REVEAL_CLASS);
+            headerRevealTimerId = null;
+        }, HEADER_REVEAL_DURATION_MS);
+    }
+
     function getHostOffset() {
         return window.matchMedia('(max-width: 640px)').matches ? 14 : 24;
     }
@@ -1842,8 +1959,8 @@
 
     function getPanelSizeLimits() {
         const viewportPadding = getViewportPadding();
-        const maxWidth = Math.max(220, window.innerWidth - (viewportPadding * 2));
-        const maxHeight = Math.max(280, window.innerHeight - (viewportPadding * 2));
+        const maxWidth = Math.min(MAX_PANEL_WIDTH, Math.max(220, window.innerWidth - (viewportPadding * 2)));
+        const maxHeight = Math.min(MAX_PANEL_HEIGHT, Math.max(280, window.innerHeight - (viewportPadding * 2)));
         const minWidth = Math.min(MIN_PANEL_WIDTH, maxWidth);
         const minHeight = Math.min(MIN_PANEL_HEIGHT, maxHeight);
         return {
@@ -1944,7 +2061,8 @@
             // One-time size migration from old default geometry.
             const isLegacyDefaultSize =
                 (loaded.width === PREVIOUS_DEFAULT_PANEL_WIDTH && loaded.height === PREVIOUS_DEFAULT_PANEL_HEIGHT) ||
-                (loaded.width === INTERMEDIATE_DEFAULT_PANEL_WIDTH && loaded.height === INTERMEDIATE_DEFAULT_PANEL_HEIGHT);
+                (loaded.width === INTERMEDIATE_DEFAULT_PANEL_WIDTH && loaded.height === INTERMEDIATE_DEFAULT_PANEL_HEIGHT) ||
+                (loaded.width === LEGACY_PANEL_WIDTH && loaded.height === LEGACY_PANEL_HEIGHT);
             if (isLegacyDefaultSize) {
                 loaded.width = DEFAULT_PANEL_WIDTH;
                 loaded.height = DEFAULT_PANEL_HEIGHT;
@@ -1954,8 +2072,14 @@
                 loaded.panelPosition = null;
             }
             if (typeof loaded.customPosition !== 'boolean') loaded.customPosition = false;
-            if (typeof loaded.movable !== 'boolean') loaded.movable = true;
-            if (typeof loaded.resizable !== 'boolean') loaded.resizable = true;
+            loaded.movable = true;
+            loaded.resizable = true;
+            if (!loaded.customPosition) {
+                loaded.panelPosition = null;
+            }
+            // The content script is injected on demand, so restoring an "open" mode here
+            // causes a first-paint flash before the requested action runs.
+            loaded.mode = 'hidden';
             // Legacy builds persisted top-right as a "custom" position. Reset to the new bottom-right default.
             if (isLikelyLegacyTopRightPosition(loaded)) {
                 loaded.customPosition = false;
@@ -2076,12 +2200,12 @@
             panel.setAttribute('data-active-pane', targetPane);
         }
 
-        const chatTab = shadowRoot.getElementById('sc-pane-chat');
-        const historyTab = shadowRoot.getElementById('sc-pane-history');
-        const profileTab = shadowRoot.getElementById('sc-pane-profile');
-        if (chatTab) chatTab.classList.toggle('active', targetPane === 'chat');
-        if (historyTab) historyTab.classList.toggle('active', targetPane === 'history');
-        if (profileTab) profileTab.classList.toggle('active', targetPane === 'profile');
+        const chatTabs = [shadowRoot.getElementById('sc-pane-chat'), shadowRoot.getElementById('sc-chat-nav')].filter(Boolean);
+        const historyTabs = [shadowRoot.getElementById('sc-pane-history'), shadowRoot.getElementById('sc-history-btn')].filter(Boolean);
+        const profileTabs = [shadowRoot.getElementById('sc-pane-profile'), shadowRoot.getElementById('sc-profile-btn')].filter(Boolean);
+        chatTabs.forEach((tab) => tab.classList.toggle('active', targetPane === 'chat'));
+        historyTabs.forEach((tab) => tab.classList.toggle('active', targetPane === 'history'));
+        profileTabs.forEach((tab) => tab.classList.toggle('active', targetPane === 'profile'));
 
         uiState.activePane = targetPane;
         refreshProfileNudgeVisibility();
@@ -2091,6 +2215,7 @@
     function setUiMode(mode, persist = true) {
         const previousMode = uiState.mode;
         const targetMode = ['open', 'hidden'].includes(mode) ? mode : 'open';
+        const shouldAnimateHeader = targetMode === 'open' && previousMode !== 'open';
         uiState.mode = targetMode;
         if (previousMode !== targetMode) {
             hotkeyLog('ui_mode_changed', { from: previousMode, to: targetMode, persist });
@@ -2101,6 +2226,11 @@
         applyPanelGeometry();
         if (targetMode === 'open') {
             setActivePane(uiState.activePane || 'chat', false);
+            if (shouldAnimateHeader) {
+                requestAnimationFrame(() => playHeaderRevealAnimation());
+            }
+        } else {
+            clearHeaderRevealAnimation();
         }
         refreshProfileNudgeVisibility();
         if (persist) persistUiState();
@@ -2139,8 +2269,24 @@
 
     function setupPanelPointerInteractions() {
         const panel = shadowRoot?.getElementById('sc-panel');
+        const header = shadowRoot?.querySelector('.sc-header');
         const headerTop = shadowRoot?.querySelector('.sc-header-top');
-        if (!panel || !headerTop) return;
+        const grabZone = shadowRoot?.getElementById('sc-grab-zone');
+        if (!panel || !header || !headerTop || !grabZone) return;
+
+        const moveTargets = [grabZone, header];
+        const dragStateTargets = [grabZone, header, headerTop];
+        const getInteractionCursor = (interactionType, direction = '') => {
+            if (interactionType === 'move') return 'grabbing';
+            if (!direction) return '';
+            return `${direction}-resize`;
+        };
+        const setDocumentCursor = (cursor = '') => {
+            document.documentElement.style.cursor = cursor;
+            if (document.body) {
+                document.body.style.cursor = cursor;
+            }
+        };
 
         const startInteraction = (event, interactionType, direction = '') => {
             if (activePanelInteraction) return;
@@ -2168,14 +2314,17 @@
                 startTop: uiState.panelPosition.top,
                 startWidth: uiState.width,
                 startHeight: uiState.height,
-                target
+                target,
+                rootCursor: document.documentElement.style.cursor,
+                bodyCursor: document.body?.style.cursor || ''
             };
             uiState.customPosition = true;
 
             panel.classList.add('sc-interacting');
             if (interactionType === 'move') {
-                headerTop.classList.add('sc-dragging');
+                dragStateTargets.forEach((targetNode) => targetNode.classList.add('sc-dragging'));
             }
+            setDocumentCursor(getInteractionCursor(interactionType, direction));
 
             if (target.setPointerCapture) {
                 try {
@@ -2186,6 +2335,9 @@
             const finishInteraction = () => {
                 if (!activePanelInteraction || activePanelInteraction.pointerId !== pointerId) return;
 
+                target.removeEventListener('pointermove', onPointerMove);
+                target.removeEventListener('pointerup', onPointerUpOrCancel);
+                target.removeEventListener('pointercancel', onPointerUpOrCancel);
                 window.removeEventListener('pointermove', onPointerMove, true);
                 window.removeEventListener('pointerup', onPointerUpOrCancel, true);
                 window.removeEventListener('pointercancel', onPointerUpOrCancel, true);
@@ -2200,7 +2352,11 @@
                 }
 
                 panel.classList.remove('sc-interacting');
-                headerTop.classList.remove('sc-dragging');
+                dragStateTargets.forEach((targetNode) => targetNode.classList.remove('sc-dragging'));
+                setDocumentCursor(activePanelInteraction.rootCursor || '');
+                if (document.body) {
+                    document.body.style.cursor = activePanelInteraction.bodyCursor || '';
+                }
                 activePanelInteraction = null;
                 persistUiState();
             };
@@ -2296,6 +2452,9 @@
             };
             const onWindowBlur = () => finishInteraction();
 
+            target.addEventListener('pointermove', onPointerMove, { passive: false });
+            target.addEventListener('pointerup', onPointerUpOrCancel);
+            target.addEventListener('pointercancel', onPointerUpOrCancel);
             window.addEventListener('pointermove', onPointerMove, { passive: false, capture: true });
             window.addEventListener('pointerup', onPointerUpOrCancel, true);
             window.addEventListener('pointercancel', onPointerUpOrCancel, true);
@@ -2304,7 +2463,9 @@
             target.addEventListener('lostpointercapture', onLostPointerCapture);
         };
 
-        headerTop.addEventListener('pointerdown', (event) => startInteraction(event, 'move'));
+        moveTargets.forEach((targetNode) => {
+            targetNode.addEventListener('pointerdown', (event) => startInteraction(event, 'move'));
+        });
 
         const resizeHandles = panel.querySelectorAll('.sc-resize-handle');
         resizeHandles.forEach((handle) => {
@@ -2357,7 +2518,8 @@
             'click', 'dblclick', 'auxclick',
             'mousedown', 'mouseup',
             'pointerdown', 'pointerup',
-            'touchstart', 'touchend',
+            'touchstart', 'touchend', 'touchmove',
+            'wheel',
             'contextmenu',
             'keydown', 'keyup', 'keypress',
             'input', 'change'
@@ -2461,8 +2623,10 @@
         uiState.side = 'right';
         uiState.customPosition = false;
         uiState.panelPosition = getDefaultPanelPosition(uiState.width, uiState.height, 'right');
-        setUiMode('open');
+        resetConversationState();
+        renderWelcomeMessage(false);
         setActivePane('chat', false);
+        setUiMode('open');
     }
 
     function runUiAction(action, source = 'runtime_message') {
@@ -2506,6 +2670,8 @@
         const authUserEl = shadowRoot.getElementById('sc-auth-user');
         const historyBtn = shadowRoot.getElementById('sc-history-btn');
         const profileBtn = shadowRoot.getElementById('sc-profile-btn');
+        const historyNavBtn = shadowRoot.getElementById('sc-pane-history');
+        const profileNavBtn = shadowRoot.getElementById('sc-pane-profile');
         const newChatBtn = shadowRoot.getElementById('sc-new-chat');
         const attachToggle = shadowRoot.getElementById('sc-attach-screen-toggle');
         const accountSummaryEl = shadowRoot.getElementById('sc-account-summary');
@@ -2525,11 +2691,17 @@
             accountSummaryEl.hidden = !authenticated;
         }
         if (authenticated && signedInUser) {
+            const resolvedAccountName = isNonEmptyString(userProfile?.fullName)
+                ? userProfile.fullName.trim()
+                : getUserDisplayName(signedInUser);
+            const resolvedAccountEmail = isNonEmptyString(userProfile?.email)
+                ? userProfile.email.trim()
+                : (signedInUser.email || '');
             if (accountNameEl) {
-                accountNameEl.textContent = getUserDisplayName(signedInUser);
+                accountNameEl.textContent = resolvedAccountName;
             }
             if (accountEmailEl) {
-                accountEmailEl.textContent = signedInUser.email || '';
+                accountEmailEl.textContent = resolvedAccountEmail;
             }
             if (accountAvatarFallbackEl) {
                 accountAvatarFallbackEl.textContent = getUserAvatarInitial(signedInUser);
@@ -2552,6 +2724,8 @@
 
         if (historyBtn) historyBtn.disabled = !authenticated;
         if (profileBtn) profileBtn.disabled = !authenticated;
+        if (historyNavBtn) historyNavBtn.disabled = !authenticated;
+        if (profileNavBtn) profileNavBtn.disabled = !authenticated;
         if (newChatBtn) newChatBtn.disabled = !authenticated;
         if (attachToggle) attachToggle.disabled = !authenticated;
 
@@ -2568,7 +2742,7 @@
                 }
             }
         } else if (!isAwaitingResponse) {
-            setInputState(true, 'Ask me anything about this page...');
+            setInputState(true, 'Ask me anything...');
             if (uiState.activePane === 'auth') {
                 setActivePane('chat', false);
             }
@@ -2666,33 +2840,19 @@
     function renderWelcomeMessage(withTypewriter = false) {
         const messagesArea = shadowRoot?.getElementById('sc-messages');
         if (!messagesArea) return;
-
-        const welcomeText = "Hello! I'm ScreenChat. Ask anything about this page and I will help.";
-        const welcomeTimestamp = Date.now();
-        if (withTypewriter && !hasTypedWelcome) {
-            messagesArea.innerHTML = `
-                <div class="sc-message ai">
-                    <div class="sc-bubble">
-                        <span id="sc-welcome-typewriter" class="sc-typewriter-target"></span>
-                    </div>
-                    <div class="sc-timestamp" data-timestamp="${welcomeTimestamp}">${formatRelativeTimestamp(welcomeTimestamp)}</div>
-                </div>
-            `;
-            const target = messagesArea.querySelector('#sc-welcome-typewriter');
-            runTypewriter(target, welcomeText, 10);
-            hasTypedWelcome = true;
+        messagesArea.innerHTML = '';
+        const welcomeMessageEl = addMessage('', 'ai', null, true, Date.now(), true);
+        const bubble = welcomeMessageEl?.querySelector('.sc-bubble');
+        if (bubble && withTypewriter) {
+            runTypewriter(bubble, DEFAULT_WELCOME_MESSAGE);
         } else {
-            messagesArea.innerHTML = `
-                <div class="sc-message ai">
-                    <div class="sc-bubble">${escapeHtml(welcomeText)}</div>
-                    <div class="sc-timestamp" data-timestamp="${welcomeTimestamp}">${formatRelativeTimestamp(welcomeTimestamp)}</div>
-                </div>
-            `;
+            updateMessageContent(welcomeMessageEl, DEFAULT_WELCOME_MESSAGE, null, { forceScroll: true });
         }
+        hasTypedWelcome = !!withTypewriter;
         syncQuickPromptsVisibility();
     }
 
-    function startNewSession(resetUI = true, withTypewriter = false) {
+    function resetConversationState() {
         sessionId = createSessionId();
         sessionUrl = window.location.href || window.location.hostname || 'unknown';
         sessionUpdatedAt = null;
@@ -2700,12 +2860,20 @@
         isAwaitingResponse = false;
         hasLocalConversationMutation = false;
         clearPersistedConversationState();
+    }
+
+    function startNewSession(resetUI = true, withTypewriter = false) {
+        resetConversationState();
 
         if (resetUI) {
             renderWelcomeMessage(withTypewriter);
             setActivePane('chat');
             setUiMode('open');
         }
+    }
+
+    function getUiSvgUrl(filename) {
+        return chrome.runtime.getURL(`icons/svgs/${filename}`);
     }
 
     function getAttachScreenTooltip(isEnabled) {
@@ -2728,7 +2896,7 @@
 
     function positionProfileNudge() {
         const nudge = shadowRoot?.getElementById('sc-profile-nudge');
-        const profileBtn = shadowRoot?.getElementById('sc-profile-btn');
+        const profileBtn = shadowRoot?.getElementById('sc-profile-btn') || shadowRoot?.getElementById('sc-pane-profile');
         if (!nudge || !profileBtn) return;
 
         const buttonRect = profileBtn.getBoundingClientRect();
@@ -2752,7 +2920,7 @@
 
     function setProfileNudgeVisible(visible) {
         const nudge = shadowRoot?.getElementById('sc-profile-nudge');
-        const profileBtn = shadowRoot?.getElementById('sc-profile-btn');
+        const profileBtn = shadowRoot?.getElementById('sc-profile-btn') || shadowRoot?.getElementById('sc-pane-profile');
         if (!nudge) return;
         const shouldShow = !!visible;
         nudge.classList.toggle('visible', shouldShow);
@@ -2806,12 +2974,17 @@
     function setAttachScreenEnabled(enabled, persist = true) {
         const wasEnabled = attachScreenEnabled;
         attachScreenEnabled = !!enabled;
-        const toggle = shadowRoot?.getElementById('sc-attach-screen-toggle');
-        if (toggle) {
-            toggle.classList.toggle('active', attachScreenEnabled);
-            toggle.setAttribute('aria-pressed', attachScreenEnabled ? 'true' : 'false');
-            toggle.setAttribute('aria-label', attachScreenEnabled ? 'Disable attach screen' : 'Enable attach screen');
-            toggle.setAttribute('data-tooltip', getAttachScreenTooltip(attachScreenEnabled));
+        const attachToggle = shadowRoot?.getElementById('sc-attach-screen-toggle');
+        const toggleIcon = attachToggle?.querySelector('.sc-attach-icon');
+        if (attachToggle) {
+            attachToggle.classList.toggle('active', attachScreenEnabled);
+            attachToggle.setAttribute('aria-pressed', attachScreenEnabled ? 'true' : 'false');
+            attachToggle.setAttribute('aria-label', attachScreenEnabled ? 'Remove attached screenshot' : 'Attach screenshot');
+            attachToggle.setAttribute('data-tooltip', getAttachScreenTooltip(attachScreenEnabled));
+            attachToggle.setAttribute('title', attachScreenEnabled ? 'Remove attached screenshot' : 'Attach screenshot');
+        }
+        if (toggleIcon) {
+            toggleIcon.src = getUiSvgUrl(attachScreenEnabled ? 'minus-square-Filled.svg' : 'plus-square-Filled.svg');
         }
 
         if (attachScreenEnabled && !wasEnabled && persist) {
@@ -2975,8 +3148,7 @@
             }
         });
 
-        chrome.storage.local.get([AUTH_SESSION_KEY, 'screenchat_user', CONVERSATION_HISTORY_KEY, SESSION_STATE_KEY, 'messageCount', LEGACY_SESSION_DOMAIN_KEY, ATTACH_SCREEN_KEY, PROFILE_NUDGE_OPT_OUT_KEY], (result) => {
-            const currentDomain = window.location.hostname;
+        chrome.storage.local.get([AUTH_SESSION_KEY, 'screenchat_user', 'messageCount', ATTACH_SCREEN_KEY, PROFILE_NUDGE_OPT_OUT_KEY, PROFILE_CACHE_KEY], (result) => {
             profileNudgeOptOut = !!result[PROFILE_NUDGE_OPT_OUT_KEY];
             if (typeof result[ATTACH_SCREEN_KEY] === 'boolean') {
                 setAttachScreenEnabled(result[ATTACH_SCREEN_KEY], false);
@@ -2984,52 +3156,37 @@
                 setAttachScreenEnabled(attachScreenEnabled, true);
             }
 
+            const cachedProfileIdentity = normalizeProfileIdentity(result[PROFILE_CACHE_KEY]) || readProfileIdentityFromLocalStorage();
+            if (cachedProfileIdentity) {
+                persistProfileIdentity(cachedProfileIdentity);
+                userProfile = applyProfileFormValues({
+                    profileNameInput,
+                    profileNicknameInput,
+                    profileEmailInput,
+                    profilePhoneInput,
+                    profileNotesInput
+                }, {
+                    fullName: cachedProfileIdentity.fullName || '',
+                    nickname: '',
+                    email: cachedProfileIdentity.email || '',
+                    phone: '',
+                    notes: ''
+                });
+            }
+
             const storedAuthSession = normalizeStoredAuthSession(result[AUTH_SESSION_KEY]);
             const hasStoredAuthSession = !!storedAuthSession;
-            const storedSessionState = normalizeStoredSessionState(result[SESSION_STATE_KEY]);
-            const storedConversationHistory = normalizeConversationHistory(result[CONVERSATION_HISTORY_KEY]);
             // Stored session must be re-validated with backend before UI treats it as signed in.
             setAuthSession(storedAuthSession, { persist: false, verified: false });
             isAuthRestoreInFlight = hasStoredAuthSession;
-            if (storedSessionState?.sessionId) {
-                sessionId = storedSessionState.sessionId;
-            }
-            if (storedSessionState?.sessionUrl) {
-                sessionUrl = storedSessionState.sessionUrl;
-            }
-            if (storedSessionState?.updatedAt) {
-                sessionUpdatedAt = storedSessionState.updatedAt;
-            }
 
             if (result.screenchat_user || result.messageCount) {
                 chrome.storage.local.remove(['screenchat_user', 'messageCount']);
             }
 
-            if ((storedSessionState?.sessionDomain || result[LEGACY_SESSION_DOMAIN_KEY]) && (storedSessionState?.sessionDomain || result[LEGACY_SESSION_DOMAIN_KEY]) !== currentDomain) {
-                startNewSession(false, false);
-            }
-
             const messagesArea = shadowRoot.getElementById('sc-messages');
-            const uiAlreadyHasMessages = !!messagesArea?.querySelector('.sc-message');
-            const canHydrateConversation = !hasLocalConversationMutation && !uiAlreadyHasMessages && conversationHistory.length === 0;
-            const canUseStoredSessionData = isAuthenticated() || hasStoredAuthSession;
-
-            if (canHydrateConversation) {
-                const storedSessionDomain = storedSessionState?.sessionDomain || result[LEGACY_SESSION_DOMAIN_KEY];
-                if (canUseStoredSessionData && storedConversationHistory.length > 0 && (!storedSessionDomain || storedSessionDomain === currentDomain)) {
-                    applyConversationState({
-                        sessionId: storedSessionState?.sessionId,
-                        sessionUrl: storedSessionState?.sessionUrl,
-                        history: storedConversationHistory,
-                        updatedAt: storedSessionState?.updatedAt,
-                        persist: false,
-                        withTypewriter: false
-                    });
-                } else if (canUseStoredSessionData) {
-                    renderWelcomeMessage(true);
-                } else if (messagesArea) {
-                    messagesArea.innerHTML = '';
-                }
+            if (messagesArea && !messagesArea.querySelector('.sc-message')) {
+                renderWelcomeMessage(hasStoredAuthSession);
             }
             const finalizeHydration = () => {
                 isAuthRestoreInFlight = false;
@@ -3076,7 +3233,6 @@
                             emailVerified: !!user.emailVerified
                         }
                     });
-                    await syncLatestHistoryIntoChat();
                 } catch (error) {
                     console.warn('[Auth] Stored session validation failed:', error);
                     requireAuthenticationUi('Please sign in with Google to continue.');
@@ -3091,45 +3247,52 @@
     function createUI() {
         container = document.createElement('div');
         container.className = 'sc-shell';
+        const logoUrl = chrome.runtime.getURL('icons/icon48.png');
+        const historyIconUrl = getUiSvgUrl('clock.svg');
+        const chatIconUrl = getUiSvgUrl('comment-dots.svg');
+        const profileIconUrl = getUiSvgUrl('user.svg');
+        const closeIconUrl = getUiSvgUrl('times-square.svg');
+        const backIconUrl = getUiSvgUrl('arrow-left.svg');
+        const attachIconUrl = getUiSvgUrl(attachScreenEnabled ? 'minus-square-Filled.svg' : 'plus-square-Filled.svg');
+        const sendIconUrl = getUiSvgUrl('send.svg');
+        const toolbarTrashIconUrl = getUiSvgUrl('Icon Button.svg');
+        const logoutIconUrl = getUiSvgUrl('Log out.svg');
 
         container.innerHTML = `
             <button class="sc-launcher" id="sc-launcher" title="Open ScreenChat" aria-label="Open ScreenChat">
-                <img src="${chrome.runtime.getURL('icons/icon48.png')}" class="sc-launcher-logo" alt="ScreenChat">
+                <img src="${logoUrl}" class="sc-launcher-logo" alt="ScreenChat">
             </button>
 
             <section class="sc-panel" id="sc-panel" role="dialog" aria-label="ScreenChat Assistant">
+                <div class="sc-grab-zone" id="sc-grab-zone" aria-hidden="true">
+                    <span class="sc-grab-pill"></span>
+                </div>
                 <div class="sc-header">
                     <div class="sc-header-top">
+                        <button class="sc-btn-icon sc-header-back" id="sc-header-back" title="Back" aria-label="Back to chat">
+                            <img src="${backIconUrl}" class="sc-icon-img sc-icon-img-back" alt="" aria-hidden="true">
+                        </button>
                         <div class="sc-header-left">
-                            <img src="${chrome.runtime.getURL('icons/icon48.png')}" class="sc-logo" alt="ScreenChat">
+                            <img src="${logoUrl}" class="sc-logo" alt="ScreenChat">
                             <div class="sc-brand-copy">
                                 <span class="sc-title">ScreenChat</span>
+                                <span class="sc-subtitle">Context for what is on screen</span>
                             </div>
                         </div>
                         <div class="sc-header-actions">
                             <div class="sc-header-actions-extra">
                                 <button class="sc-btn-icon" id="sc-history-btn" title="History" aria-label="History">
-                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                                        <path d="M3 12a9 9 0 109-9 9.2 9.2 0 00-6.36 2.6" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
-                                        <path d="M3 4v4h4M12 7v5l3 2" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
-                                    </svg>
+                                    <img src="${historyIconUrl}" class="sc-icon-img" alt="" aria-hidden="true">
+                                </button>
+                                <button class="sc-btn-icon sc-btn-new" id="sc-new-chat" title="Chat" aria-label="Open chat">
+                                    <img src="${chatIconUrl}" class="sc-icon-img" alt="" aria-hidden="true">
                                 </button>
                                 <button class="sc-btn-icon" id="sc-profile-btn" title="Profile" aria-label="Profile">
-                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                                        <circle cx="12" cy="8" r="3.4" stroke="currentColor" stroke-width="1.9"/>
-                                        <path d="M5.5 19.2c1.55-2.56 3.9-3.84 6.5-3.84s4.95 1.28 6.5 3.84" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
-                                    </svg>
-                                </button>
-                                <button class="sc-btn-icon sc-btn-new" id="sc-new-chat" title="New Chat" aria-label="Start new chat">
-                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                        <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-                                    </svg>
+                                    <img src="${profileIconUrl}" class="sc-icon-img" alt="" aria-hidden="true">
                                 </button>
                             </div>
                             <button class="sc-btn-icon" id="sc-close" title="Close" aria-label="Close ScreenChat">
-                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                    <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-                                </svg>
+                                <img src="${closeIconUrl}" class="sc-icon-img sc-icon-img-close" alt="" aria-hidden="true">
                             </button>
                         </div>
                     </div>
@@ -3137,55 +3300,77 @@
 
                 <div class="sc-pane sc-pane-auth" id="sc-auth-view">
                     <div class="sc-auth-card">
-                        <h3>Sign in</h3>
-                        <p class="sc-auth-copy">Sync chat history with Google.</p>
+                        <h3>Continue to ScreenChat</h3>
+                        <p class="sc-auth-copy">Save your sessions, reopen past chats, and ask about anything visible on the page.</p>
                         <button class="sc-google-signin-btn" id="sc-google-signin-btn" type="button">
-                            <span aria-hidden="true">G</span>
-                            Continue with Google
+                            <span class="sc-google-mark" aria-hidden="true">G</span>
+                            <span>Sign in with Google</span>
                         </button>
                         <p class="sc-auth-user" id="sc-auth-user"></p>
-                        <p class="sc-auth-status" id="sc-auth-status">Sign in to continue.</p>
+                        <p class="sc-auth-status" id="sc-auth-status"></p>
                     </div>
                 </div>
 
                 <div class="sc-pane sc-pane-chat visible" id="sc-chat-pane">
                     <div class="sc-messages" id="sc-messages"></div>
                     <div class="sc-quick-prompts" id="sc-quick-prompts">
-                        <button class="sc-prompt-btn" data-prompt="Summarize this page in 5 bullets.">
+                        <button class="sc-prompt-btn" type="button" data-prompt="What are the key takeaways from this page?">
                             <span class="sc-prompt-main">
                                 <span class="sc-prompt-emoji" aria-hidden="true">📝</span>
-                                <span class="sc-prompt-title">Summarize this page</span>
+                                <span class="sc-prompt-title">Key takeaways</span>
                             </span>
                             <span class="sc-prompt-chip">/summary</span>
                         </button>
-                        <button class="sc-prompt-btn" data-prompt="What are the most important takeaways here?">
+                        <button class="sc-prompt-btn" type="button" data-prompt="Give me a summary of the page.">
                             <span class="sc-prompt-main">
                                 <span class="sc-prompt-emoji" aria-hidden="true">💡</span>
-                                <span class="sc-prompt-title">Key takeaways</span>
+                                <span class="sc-prompt-title">Summary of the page</span>
                             </span>
-                            <span class="sc-prompt-chip">/takeaways</span>
+                            <span class="sc-prompt-chip">/explain</span>
                         </button>
-                        <button class="sc-prompt-btn" data-prompt="What should I understand next about this page?">
+                        <button class="sc-prompt-btn" type="button" data-prompt="Draft the next reply or action I should take from this page.">
                             <span class="sc-prompt-main">
                                 <span class="sc-prompt-emoji" aria-hidden="true">🧭</span>
-                                <span class="sc-prompt-title">What should I understand next?</span>
+                                <span class="sc-prompt-title">Draft my next step</span>
                             </span>
-                            <span class="sc-prompt-chip">/focus</span>
+                            <span class="sc-prompt-chip">/reply</span>
+                        </button>
+                        <button class="sc-prompt-btn" type="button" data-prompt="Explain this page in simple language and define any jargon I should know.">
+                            <span class="sc-prompt-main">
+                                <span class="sc-prompt-title">Explain it simply</span>
+                            </span>
+                            <span class="sc-prompt-chip">/simplify</span>
+                        </button>
+                        <button class="sc-prompt-btn" type="button" data-prompt="List the concrete action items, tasks, or next steps suggested by this page.">
+                            <span class="sc-prompt-main">
+                                <span class="sc-prompt-title">Action items</span>
+                            </span>
+                            <span class="sc-prompt-chip">/actions</span>
+                        </button>
+                        <button class="sc-prompt-btn" type="button" data-prompt="Extract the most important facts, numbers, names, and claims from this page.">
+                            <span class="sc-prompt-main">
+                                <span class="sc-prompt-title">Important facts</span>
+                            </span>
+                            <span class="sc-prompt-chip">/facts</span>
+                        </button>
+                        <button class="sc-prompt-btn" type="button" data-prompt="What follow-up questions should I ask based on this page?">
+                            <span class="sc-prompt-main">
+                                <span class="sc-prompt-title">Questions to ask</span>
+                            </span>
+                            <span class="sc-prompt-chip">/questions</span>
                         </button>
                     </div>
                     <div class="sc-hotkey-hint" id="sc-hotkey-hint"></div>
                     <div class="sc-input-area">
                         <div class="sc-input-row">
-                            <button class="sc-attach-toggle ${attachScreenEnabled ? 'active' : ''}" id="sc-attach-screen-toggle" type="button" aria-label="${attachScreenEnabled ? 'Disable attach screen' : 'Enable attach screen'}" aria-pressed="${attachScreenEnabled ? 'true' : 'false'}" data-tooltip="${getAttachScreenTooltip(attachScreenEnabled)}">
-                                <span class="sc-attach-icon" aria-hidden="true"></span>
-                            </button>
                             <div class="sc-input-wrapper">
-                                <textarea class="sc-textarea" id="sc-chat-input" placeholder="Ask me anything about this page..." rows="1"></textarea>
+                                <textarea class="sc-textarea" id="sc-chat-input" placeholder="Ask me anything..." rows="1"></textarea>
+                                <button class="sc-attach-toggle ${attachScreenEnabled ? 'active' : ''}" id="sc-attach-screen-toggle" type="button" title="${attachScreenEnabled ? 'Remove attached screenshot' : 'Attach screenshot'}" aria-label="${attachScreenEnabled ? 'Remove attached screenshot' : 'Attach screenshot'}" aria-pressed="${attachScreenEnabled ? 'true' : 'false'}" data-tooltip="${getAttachScreenTooltip(attachScreenEnabled)}">
+                                    <img src="${attachIconUrl}" class="sc-attach-icon" alt="" aria-hidden="true">
+                                </button>
                             </div>
                             <button class="sc-send-btn" id="sc-send" title="Send (Enter)" aria-label="Send message">
-                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                    <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                                </svg>
+                                <img src="${sendIconUrl}" class="sc-send-icon" alt="" aria-hidden="true">
                             </button>
                         </div>
                     </div>
@@ -3198,6 +3383,24 @@
                                 <path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                             </svg>
                         </button>
+                        <div class="sc-pane-heading">
+                            <h3>History</h3>
+                            <p>Reopen saved sessions from any page.</p>
+                        </div>
+                    </div>
+                    <div class="sc-history-tools">
+                        <button class="sc-btn-icon sc-tool-btn" id="sc-history-search-toggle" type="button" title="Search history" aria-label="Search history" aria-expanded="false" aria-controls="sc-history-search-wrap">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                                <circle cx="10.5" cy="10.5" r="5.5" stroke="currentColor" stroke-width="2"></circle>
+                                <path d="M15 15l4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+                            </svg>
+                        </button>
+                        <button class="sc-btn-icon sc-tool-btn" id="sc-history-clear" type="button" title="Clear all conversations" aria-label="Clear all conversations">
+                            <img src="${toolbarTrashIconUrl}" class="sc-icon-img sc-tool-icon" alt="" aria-hidden="true">
+                        </button>
+                    </div>
+                    <div class="sc-history-search" id="sc-history-search-wrap" hidden>
+                        <input class="sc-history-search-input" id="sc-history-search-input" type="search" placeholder="Search messages and pages" autocomplete="off" spellcheck="false">
                     </div>
                     <div class="sc-history-list" id="sc-history-list"></div>
                 </div>
@@ -3209,8 +3412,12 @@
                                 <path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                             </svg>
                         </button>
+                        <div class="sc-pane-heading">
+                            <h3>Profile</h3>
+                            <p>Personalize how ScreenChat helps you.</p>
+                        </div>
                     </div>
-                    <div class="sc-profile-content">
+                    <div class="sc-profile-content" id="sc-profile-content">
                         <div class="sc-account-summary" id="sc-account-summary" hidden>
                             <div class="sc-account-avatar-wrap" aria-hidden="true">
                                 <img class="sc-account-avatar" id="sc-account-avatar" alt="" hidden>
@@ -3228,33 +3435,58 @@
                         </div>
                         <div class="sc-profile-field">
                             <label for="sc-profile-nickname">Nickname</label>
-                            <input type="text" id="sc-profile-nickname" placeholder="Johnny">
+                            <input type="text" id="sc-profile-nickname" placeholder="Nickname">
                         </div>
                         <div class="sc-profile-field">
                             <label for="sc-profile-email">Email</label>
-                            <input type="email" id="sc-profile-email" placeholder="john@example.com">
+                            <input type="email" id="sc-profile-email" placeholder="Email">
                         </div>
                         <div class="sc-profile-field">
                             <label for="sc-profile-phone">Phone</label>
-                            <input type="tel" id="sc-profile-phone" placeholder="+1 234 567 8900">
+                            <input type="tel" id="sc-profile-phone" placeholder="Phone">
                         </div>
                         <div class="sc-profile-field">
                             <label for="sc-profile-notes">Notes</label>
-                            <textarea id="sc-profile-notes" placeholder="e.g., I work at Google, prefer formal responses..."></textarea>
+                            <textarea id="sc-profile-notes" placeholder="I work at google, prefer formal responses"></textarea>
                         </div>
-                        <button class="sc-profile-save" id="sc-profile-save" type="button">Save Profile</button>
+                        <button class="sc-profile-save" id="sc-profile-save" type="button">Save</button>
                         <div class="sc-profile-footer">
-                            <button class="sc-profile-signout" id="sc-profile-signout" type="button" title="Sign out" aria-label="Sign out">
-                                <svg class="sc-profile-signout-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                                    <path d="M14 7l5 5-5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                                    <path d="M19 12H9" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-                                    <path d="M10 4H6a2 2 0 00-2 2v12a2 2 0 002 2h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-                                </svg>
-                                <span class="sc-visually-hidden">Sign out</span>
-                            </button>
+                        <button class="sc-profile-signout" id="sc-profile-signout" type="button" title="Sign out" aria-label="Sign out">
+                            <img src="${logoutIconUrl}" class="sc-profile-signout-icon" alt="" aria-hidden="true">
+                            <span class="sc-visually-hidden">Sign out</span>
+                        </button>
                         </div>
                     </div>
                 </div>
+
+                <nav class="sc-bottom-nav" aria-label="ScreenChat sections">
+                    <button class="sc-nav-btn" id="sc-pane-chat" type="button" aria-label="Chat">
+                        <span class="sc-nav-icon" aria-hidden="true">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                                <path d="M6.5 8.5h11M6.5 12h7.5M8 18.5l-3.5 2v-4A7.5 7.5 0 014 4.5h16v12A2.5 2.5 0 0117.5 19h-7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                        </span>
+                        <span class="sc-nav-label">Chat</span>
+                    </button>
+                    <button class="sc-nav-btn" id="sc-pane-history" type="button" aria-label="History">
+                        <span class="sc-nav-icon" aria-hidden="true">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                                <path d="M3 12a9 9 0 109-9 9.2 9.2 0 00-6.36 2.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                                <path d="M3 4v4h4M12 7v5l3 2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                        </span>
+                        <span class="sc-nav-label">History</span>
+                    </button>
+                    <button class="sc-nav-btn" id="sc-pane-profile" type="button" aria-label="Profile">
+                        <span class="sc-nav-icon" aria-hidden="true">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                                <circle cx="12" cy="8" r="3.3" stroke="currentColor" stroke-width="1.8"/>
+                                <path d="M5.5 19.2c1.55-2.56 3.9-3.84 6.5-3.84s4.95 1.28 6.5 3.84" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                            </svg>
+                        </span>
+                        <span class="sc-nav-label">Profile</span>
+                    </button>
+                </nav>
 
                 <div class="sc-resize-handle sc-resize-handle-n" data-direction="n" aria-hidden="true"></div>
                 <div class="sc-resize-handle sc-resize-handle-e" data-direction="e" aria-hidden="true"></div>
@@ -3285,8 +3517,13 @@
 
     function setupEventListeners() {
         const launcherBtn = shadowRoot.getElementById('sc-launcher');
+        const panel = shadowRoot.getElementById('sc-panel');
         const closeBtn = shadowRoot.getElementById('sc-close');
+        const headerBackBtn = shadowRoot.getElementById('sc-header-back');
         const newChatBtn = shadowRoot.getElementById('sc-new-chat');
+        const chatPaneBtn = shadowRoot.getElementById('sc-pane-chat');
+        const historyPaneBtn = shadowRoot.getElementById('sc-pane-history');
+        const profilePaneBtn = shadowRoot.getElementById('sc-pane-profile');
 
         const historyBtn = shadowRoot.getElementById('sc-history-btn');
         const profileBtn = shadowRoot.getElementById('sc-profile-btn');
@@ -3297,6 +3534,12 @@
         const sendBtn = shadowRoot.getElementById('sc-send');
         const textarea = shadowRoot.getElementById('sc-chat-input');
         const messagesArea = shadowRoot.getElementById('sc-messages');
+        const historyList = shadowRoot.getElementById('sc-history-list');
+        const historySearchToggleBtn = shadowRoot.getElementById('sc-history-search-toggle');
+        const historySearchWrap = shadowRoot.getElementById('sc-history-search-wrap');
+        const historySearchInput = shadowRoot.getElementById('sc-history-search-input');
+        const historyClearBtn = shadowRoot.getElementById('sc-history-clear');
+        const profileContent = shadowRoot.getElementById('sc-profile-content');
         const attachScreenToggle = shadowRoot.getElementById('sc-attach-screen-toggle');
         const googleSignInBtn = shadowRoot.getElementById('sc-google-signin-btn');
 
@@ -3310,8 +3553,36 @@
         const profileNudgeSkipBtn = shadowRoot.getElementById('sc-profile-nudge-skip');
         const profileNudgeStopBtn = shadowRoot.getElementById('sc-profile-nudge-stop');
 
+        const quickPrompts = shadowRoot.getElementById('sc-quick-prompts');
         const quickPromptButtons = shadowRoot.querySelectorAll('.sc-prompt-btn');
+        const HISTORY_FETCH_LIMIT = 250;
+        let historySessions = [];
+        let historySearchQuery = '';
+        let historySearchOpen = false;
+        let historyLoading = false;
+        let historyErrorMessage = '';
+        let historyRestoringSessionId = '';
+        let historyDeletingSessionId = '';
+        let historyClearingAll = false;
+        let historyOpenMenuSessionId = '';
         setupPanelPointerInteractions();
+        [
+            closeBtn,
+            headerBackBtn,
+            newChatBtn,
+            chatPaneBtn,
+            historyPaneBtn,
+            profilePaneBtn,
+            historyBtn,
+            profileBtn,
+            historyCloseBtn,
+            profileCloseBtn,
+            sendBtn,
+            attachScreenToggle,
+            googleSignInBtn,
+            profileSaveBtn,
+            profileSignOutBtn
+        ].forEach(bindPressScale);
 
         function syncProfileState(profile) {
             const storedProfile = profile && typeof profile === 'object' && !Array.isArray(profile)
@@ -3326,6 +3597,9 @@
                 profileNotesInput
             }, storedProfile);
 
+            persistProfileIdentity(userProfile);
+            syncAuthUi();
+
             if (storedProfile && hasAnyProfileValue(userProfile)) {
                 setProfileNudgeOptOut(true);
             }
@@ -3337,8 +3611,8 @@
             if (!googleSignInBtn) return;
             googleSignInBtn.disabled = !!loading;
             googleSignInBtn.innerHTML = loading
-                ? 'Signing in...'
-                : '<span aria-hidden="true">G</span> Continue with Google';
+                ? '<span class="sc-google-mark" aria-hidden="true">G</span><span>Signing in...</span>'
+                : '<span class="sc-google-mark" aria-hidden="true">G</span><span>Sign in with Google</span>';
         }
 
         function setProfileSignOutState(state = 'idle') {
@@ -3369,16 +3643,370 @@
                 return;
             }
             profileSignOutBtn.innerHTML = `
-                <svg class="sc-profile-signout-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                    <path d="M14 7l5 5-5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
-                    <path d="M19 12H9" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
-                    <path d="M10 4H6a2 2 0 00-2 2v12a2 2 0 002 2h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
-                </svg>
+                <img src="${getUiSvgUrl('Log out.svg')}" class="sc-profile-signout-icon" alt="" aria-hidden="true">
                 <span class="sc-visually-hidden">Sign out</span>
             `;
             profileSignOutBtn.setAttribute('title', 'Sign out');
             profileSignOutBtn.setAttribute('aria-label', 'Sign out');
         }
+
+        function bindPressScale(button) {
+            if (!(button instanceof HTMLElement) || button.dataset.scPressScaleBound === '1') return;
+            button.dataset.scPressScaleBound = '1';
+            const clearPressed = () => button.classList.remove('sc-pressing');
+            button.addEventListener('pointerdown', (event) => {
+                if (event.button !== 0) return;
+                button.classList.add('sc-pressing');
+                try {
+                    button.setPointerCapture(event.pointerId);
+                } catch {
+                    // Pointer capture is optional here; the visual state still works without it.
+                }
+            });
+            button.addEventListener('pointerup', clearPressed);
+            button.addEventListener('pointercancel', clearPressed);
+            button.addEventListener('lostpointercapture', clearPressed);
+            button.addEventListener('blur', clearPressed);
+        }
+
+        function bindHorizontalPromptScroller(container) {
+            if (!(container instanceof HTMLElement)) return;
+
+            let activePointerId = null;
+            let dragStartX = 0;
+            let dragStartScrollLeft = 0;
+            let isDragging = false;
+            let suppressNextClick = false;
+
+            const hasHorizontalOverflow = () => (container.scrollWidth - container.clientWidth) > 1;
+
+            const stopDragging = () => {
+                if (activePointerId !== null) {
+                    try {
+                        container.releasePointerCapture(activePointerId);
+                    } catch {
+                        // Pointer capture is optional for drag scrolling.
+                    }
+                }
+                activePointerId = null;
+                isDragging = false;
+                container.classList.remove('sc-drag-scrolling');
+            };
+
+            container.addEventListener('pointerdown', (event) => {
+                if (event.button !== 0 || !hasHorizontalOverflow()) return;
+                cancelSmoothWheelRouting(container);
+                activePointerId = event.pointerId;
+                dragStartX = event.clientX;
+                dragStartScrollLeft = container.scrollLeft;
+                isDragging = false;
+                suppressNextClick = false;
+            });
+
+            container.addEventListener('pointermove', (event) => {
+                if (activePointerId !== event.pointerId) return;
+
+                const deltaX = event.clientX - dragStartX;
+                if (!isDragging && Math.abs(deltaX) > 6) {
+                    isDragging = true;
+                    suppressNextClick = true;
+                    container.classList.add('sc-drag-scrolling');
+                    try {
+                        container.setPointerCapture(event.pointerId);
+                    } catch {
+                        // Pointer capture is optional for drag scrolling.
+                    }
+                }
+
+                if (!isDragging) return;
+                event.preventDefault();
+                container.scrollLeft = dragStartScrollLeft - deltaX;
+            });
+
+            container.addEventListener('pointerup', stopDragging);
+            container.addEventListener('pointercancel', stopDragging);
+            container.addEventListener('lostpointercapture', stopDragging);
+
+            container.addEventListener('click', (event) => {
+                if (!suppressNextClick) return;
+                event.preventDefault();
+                event.stopPropagation();
+                suppressNextClick = false;
+            }, true);
+
+            container.addEventListener('wheel', (event) => {
+                const maxScrollLeft = Math.max(0, container.scrollWidth - container.clientWidth);
+                if (maxScrollLeft <= 1) return;
+
+                const primaryDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+                const deltaX = normalizeWheelDelta(primaryDelta, event.deltaMode, container, 'x');
+                if (!deltaX) return;
+
+                const didScroll = queueSmoothWheelScroll(container, deltaX, 0, {
+                    smooth: event.deltaMode === WheelEvent.DOM_DELTA_PIXEL
+                });
+                if (!didScroll) return;
+
+                event.preventDefault();
+                event.stopPropagation();
+            }, { passive: false });
+        }
+
+        function bindAutoHidingScrollbar(container) {
+            if (!container) return;
+
+            let hideTimerId = null;
+            let syncFrameId = 0;
+
+            const clearHideTimer = () => {
+                if (!hideTimerId) return;
+                clearTimeout(hideTimerId);
+                hideTimerId = null;
+            };
+
+            const syncScrollState = () => {
+                syncFrameId = 0;
+                const hasOverflow = (container.scrollHeight - container.clientHeight) > 1;
+                container.classList.toggle('sc-has-scroll', hasOverflow);
+                if (!hasOverflow) {
+                    clearHideTimer();
+                    container.classList.remove('sc-scroll-active');
+                }
+            };
+
+            const requestSyncScrollState = () => {
+                if (syncFrameId) return;
+                syncFrameId = requestAnimationFrame(syncScrollState);
+            };
+
+            const scheduleHideScrollbar = () => {
+                const hasOverflow = (container.scrollHeight - container.clientHeight) > 1;
+                container.classList.toggle('sc-has-scroll', hasOverflow);
+                clearHideTimer();
+                if (!hasOverflow) {
+                    container.classList.remove('sc-scroll-active');
+                    return;
+                }
+                hideTimerId = setTimeout(() => {
+                    hideTimerId = null;
+                    container.classList.remove('sc-scroll-active');
+                }, 1400);
+            };
+
+            const revealScrollbar = () => {
+                requestSyncScrollState();
+                container.classList.add('sc-scroll-active');
+                scheduleHideScrollbar();
+            };
+
+            container.addEventListener('pointerdown', () => cancelSmoothWheelRouting(container));
+            container.addEventListener('scroll', revealScrollbar, { passive: true });
+            container.addEventListener('wheel', revealScrollbar, { passive: true });
+            container.addEventListener('touchstart', revealScrollbar, { passive: true });
+            container.addEventListener('pointerenter', revealScrollbar);
+            container.addEventListener('pointerleave', scheduleHideScrollbar);
+            container.addEventListener('focusin', revealScrollbar);
+            container.addEventListener('focusout', scheduleHideScrollbar);
+            window.addEventListener('resize', requestSyncScrollState);
+
+            if (typeof ResizeObserver === 'function') {
+                const resizeObserver = new ResizeObserver(requestSyncScrollState);
+                resizeObserver.observe(container);
+                container._scResizeObserver = resizeObserver;
+            }
+
+            if (typeof MutationObserver === 'function') {
+                const mutationObserver = new MutationObserver(requestSyncScrollState);
+                mutationObserver.observe(container, {
+                    childList: true,
+                    subtree: true,
+                    characterData: true
+                });
+                container._scMutationObserver = mutationObserver;
+            }
+
+            requestSyncScrollState();
+        }
+
+        function getActivePaneScrollContainer() {
+            if (uiState.activePane === 'history') return historyList;
+            if (uiState.activePane === 'profile') return profileContent;
+            if (uiState.activePane === 'chat') return messagesArea;
+            return null;
+        }
+
+        function isScrollableOverflow(overflowValue = '') {
+            return overflowValue === 'auto' || overflowValue === 'scroll' || overflowValue === 'overlay';
+        }
+
+        function canElementScroll(element) {
+            if (!(element instanceof HTMLElement)) return false;
+            const style = window.getComputedStyle(element);
+            const canScrollY = isScrollableOverflow(style.overflowY) && (element.scrollHeight - element.clientHeight) > 1;
+            const canScrollX = isScrollableOverflow(style.overflowX) && (element.scrollWidth - element.clientWidth) > 1;
+            return canScrollX || canScrollY;
+        }
+
+        function normalizeWheelDelta(delta, deltaMode, container, axis = 'y') {
+            if (!delta) return 0;
+            if (!(container instanceof HTMLElement)) return delta;
+
+            if (deltaMode === WheelEvent.DOM_DELTA_LINE) {
+                const computed = window.getComputedStyle(container);
+                const lineHeight = Number.parseFloat(computed.lineHeight) || 16;
+                return delta * lineHeight;
+            }
+
+            if (deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+                const viewportSize = axis === 'x' ? container.clientWidth : container.clientHeight;
+                return delta * (viewportSize || 1);
+            }
+
+            return delta;
+        }
+
+        function cancelSmoothWheelRouting(container) {
+            if (!(container instanceof HTMLElement)) return;
+            const state = container._scSmoothWheelRouting;
+            if (!state) return;
+            if (state.frameId) {
+                cancelAnimationFrame(state.frameId);
+                state.frameId = 0;
+            }
+            state.targetLeft = container.scrollLeft;
+            state.targetTop = container.scrollTop;
+        }
+
+        function queueSmoothWheelScroll(container, deltaX = 0, deltaY = 0, { smooth = true } = {}) {
+            if (!(container instanceof HTMLElement)) return false;
+
+            const maxScrollLeft = Math.max(0, container.scrollWidth - container.clientWidth);
+            const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+
+            let state = container._scSmoothWheelRouting;
+            if (!state) {
+                state = {
+                    frameId: 0,
+                    targetLeft: container.scrollLeft,
+                    targetTop: container.scrollTop
+                };
+                container._scSmoothWheelRouting = state;
+            }
+
+            if (!state.frameId) {
+                state.targetLeft = container.scrollLeft;
+                state.targetTop = container.scrollTop;
+            }
+
+            const nextScrollLeft = clamp(state.targetLeft + deltaX, 0, maxScrollLeft);
+            const nextScrollTop = clamp(state.targetTop + deltaY, 0, maxScrollTop);
+            const hasPendingMovement = Math.abs(nextScrollLeft - container.scrollLeft) > ROUTED_WHEEL_SCROLL_SETTLE_PX
+                || Math.abs(nextScrollTop - container.scrollTop) > ROUTED_WHEEL_SCROLL_SETTLE_PX
+                || nextScrollLeft !== state.targetLeft
+                || nextScrollTop !== state.targetTop;
+
+            if (!hasPendingMovement) return false;
+
+            state.targetLeft = nextScrollLeft;
+            state.targetTop = nextScrollTop;
+
+            if (!smooth || prefersReducedMotion()) {
+                cancelSmoothWheelRouting(container);
+                container.scrollTo({
+                    left: nextScrollLeft,
+                    top: nextScrollTop,
+                    behavior: 'auto'
+                });
+                state.targetLeft = container.scrollLeft;
+                state.targetTop = container.scrollTop;
+                return true;
+            }
+
+            if (state.frameId) return true;
+
+            const step = () => {
+                const currentMaxScrollLeft = Math.max(0, container.scrollWidth - container.clientWidth);
+                const currentMaxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+                state.targetLeft = clamp(state.targetLeft, 0, currentMaxScrollLeft);
+                state.targetTop = clamp(state.targetTop, 0, currentMaxScrollTop);
+
+                const remainingLeft = state.targetLeft - container.scrollLeft;
+                const remainingTop = state.targetTop - container.scrollTop;
+                const settledLeft = Math.abs(remainingLeft) <= ROUTED_WHEEL_SCROLL_SETTLE_PX;
+                const settledTop = Math.abs(remainingTop) <= ROUTED_WHEEL_SCROLL_SETTLE_PX;
+
+                const nextLeft = settledLeft
+                    ? state.targetLeft
+                    : container.scrollLeft + (remainingLeft * ROUTED_WHEEL_SCROLL_EASING);
+                const nextTop = settledTop
+                    ? state.targetTop
+                    : container.scrollTop + (remainingTop * ROUTED_WHEEL_SCROLL_EASING);
+
+                container.scrollTo({
+                    left: nextLeft,
+                    top: nextTop,
+                    behavior: 'auto'
+                });
+
+                if (settledLeft && settledTop) {
+                    state.frameId = 0;
+                    container.scrollTo({
+                        left: state.targetLeft,
+                        top: state.targetTop,
+                        behavior: 'auto'
+                    });
+                    return;
+                }
+
+                state.frameId = requestAnimationFrame(step);
+            };
+
+            state.frameId = requestAnimationFrame(step);
+            return true;
+        }
+
+        function findWheelScrollContainer(event) {
+            const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+
+            for (const node of path) {
+                if (!(node instanceof HTMLElement)) continue;
+                if (node.id === 'screenchat-host') break;
+                if (canElementScroll(node)) return node;
+            }
+
+            return null;
+        }
+
+        function routeExtensionWheel(event) {
+            if (uiState.mode !== 'open') return;
+            if (activePanelInteraction) {
+                event.preventDefault();
+                event.stopPropagation();
+                return;
+            }
+
+            const nativeScrollContainer = findWheelScrollContainer(event);
+            if (nativeScrollContainer) return;
+
+            const scrollContainer = getActivePaneScrollContainer();
+            if (!(scrollContainer instanceof HTMLElement)) return;
+
+            const deltaX = normalizeWheelDelta(event.deltaX, event.deltaMode, scrollContainer, 'x');
+            const deltaY = normalizeWheelDelta(event.deltaY, event.deltaMode, scrollContainer, 'y');
+            const didScroll = queueSmoothWheelScroll(scrollContainer, deltaX, deltaY, {
+                smooth: event.deltaMode === WheelEvent.DOM_DELTA_PIXEL
+            });
+            if (!didScroll) return;
+
+            event.preventDefault();
+            event.stopPropagation();
+        }
+
+        bindAutoHidingScrollbar(messagesArea);
+        bindAutoHidingScrollbar(historyList);
+        bindAutoHidingScrollbar(profileContent);
+        bindHorizontalPromptScroller(quickPrompts);
+        panel.addEventListener('wheel', routeExtensionWheel, { passive: false });
 
         async function validateAuthSessionWithBackend() {
             if (!isAuthenticated()) return false;
@@ -3413,7 +4041,9 @@
                 syncProfileState(payload?.profile);
                 profileLoadAttempted = true;
                 refreshProfileNudgeVisibility();
-                await syncLatestHistoryIntoChat();
+                if (!conversationHistory.length) {
+                    renderWelcomeMessage(true);
+                }
                 syncAuthUi();
                 setAuthStatus('');
                 return true;
@@ -3436,10 +4066,7 @@
                 setAuthStatus('');
                 syncAuthUi();
 
-                await syncLatestHistoryIntoChat({ force: !conversationHistory.length });
-                if (!conversationHistory.length) {
-                    renderWelcomeMessage(true);
-                }
+                startNewSession(true, true);
                 await loadProfile();
                 setActivePane('chat');
                 setUiMode('open');
@@ -3458,6 +4085,7 @@
 
         if (attachScreenToggle) {
             setAttachScreenEnabled(attachScreenEnabled, false);
+            bindPressScale(attachScreenToggle);
             attachScreenToggle.addEventListener('click', () => {
                 setAttachScreenEnabled(!attachScreenEnabled, true);
             });
@@ -3478,8 +4106,7 @@
 
         if (launcherBtn) {
             launcherBtn.addEventListener('click', () => {
-                setUiMode('open');
-                setActivePane(uiState.activePane || 'chat', false);
+                openUiFromActivation();
             });
         }
 
@@ -3490,6 +4117,31 @@
             });
         }
 
+        if (headerBackBtn) {
+            headerBackBtn.addEventListener('click', () => {
+                if (!isAuthenticated()) {
+                    setActivePane('auth');
+                    return;
+                }
+                setActivePane('chat');
+            });
+        }
+
+        if (chatPaneBtn) chatPaneBtn.addEventListener('click', () => openPane('chat'));
+        if (historyPaneBtn) historyPaneBtn.addEventListener('click', () => openPane('history'));
+        if (profilePaneBtn) {
+            profilePaneBtn.addEventListener('click', () => {
+                if (!isAuthenticated()) {
+                    setActivePane('auth');
+                    setAuthStatus('Please sign in with Google to continue.', false);
+                    return;
+                }
+                profileNudgeSkippedThisSession = true;
+                refreshProfileNudgeVisibility();
+                loadProfile();
+                openPane('profile');
+            });
+        }
         if (historyBtn) historyBtn.addEventListener('click', () => openPane('history'));
         if (profileBtn) {
             profileBtn.addEventListener('click', () => {
@@ -3505,8 +4157,58 @@
             });
         }
 
+        if (historySearchToggleBtn) {
+            bindPressScale(historySearchToggleBtn);
+            historySearchToggleBtn.addEventListener('click', () => {
+                const shouldOpen = !historySearchOpen;
+                historySearchOpen = shouldOpen;
+                historyOpenMenuSessionId = '';
+                if (!shouldOpen) {
+                    historySearchQuery = '';
+                    if (historySearchInput) {
+                        historySearchInput.value = '';
+                    }
+                }
+                renderHistoryList();
+                if (shouldOpen) {
+                    syncHistoryControls({ focusSearch: true });
+                }
+            });
+        }
+
+        if (historySearchInput) {
+            historySearchInput.addEventListener('input', () => {
+                historySearchQuery = historySearchInput.value || '';
+                historyOpenMenuSessionId = '';
+                renderHistoryList();
+            });
+
+            historySearchInput.addEventListener('keydown', (event) => {
+                if (event.key !== 'Escape') return;
+                event.preventDefault();
+                if (historySearchQuery) {
+                    historySearchQuery = '';
+                    historySearchInput.value = '';
+                    renderHistoryList();
+                    return;
+                }
+                historySearchOpen = false;
+                historyOpenMenuSessionId = '';
+                renderHistoryList();
+                historySearchToggleBtn?.focus();
+            });
+        }
+
+        if (historyClearBtn) {
+            bindPressScale(historyClearBtn);
+            historyClearBtn.addEventListener('click', () => {
+                clearAllHistory();
+            });
+        }
+
         if (historyCloseBtn) historyCloseBtn.addEventListener('click', () => openPane('chat'));
         if (profileCloseBtn) profileCloseBtn.addEventListener('click', () => openPane('chat'));
+        syncHistoryControls();
 
         if (profileNudgeSkipBtn) {
             profileNudgeSkipBtn.addEventListener('click', (event) => {
@@ -3598,7 +4300,7 @@
                         refreshProfileNudgeVisibility();
                         profileSaveBtn.textContent = 'Saved';
                         setTimeout(() => {
-                            profileSaveBtn.textContent = 'Save Profile';
+                            profileSaveBtn.textContent = 'Save';
                             profileSaveBtn.disabled = false;
                             openPane('chat');
                         }, 900);
@@ -3607,14 +4309,14 @@
                     }
                 } catch (e) {
                     if (e?.message === 'Authentication required') {
-                        profileSaveBtn.textContent = 'Save Profile';
+                        profileSaveBtn.textContent = 'Save';
                         profileSaveBtn.disabled = false;
                         return;
                     }
                     console.error('[Profile] Save error:', e);
                     profileSaveBtn.textContent = 'Error';
                     setTimeout(() => {
-                        profileSaveBtn.textContent = 'Save Profile';
+                        profileSaveBtn.textContent = 'Save';
                         profileSaveBtn.disabled = false;
                     }, 1500);
                 }
@@ -3635,10 +4337,20 @@
 
                 try {
                     clearAuthSession();
+                    persistProfileIdentity(null);
                     userProfile = null;
                     profileLoadAttempted = false;
                     hasLocalConversationMutation = false;
                     conversationHistory = [];
+                    historySessions = [];
+                    historySearchQuery = '';
+                    historySearchOpen = false;
+                    historyLoading = false;
+                    historyErrorMessage = '';
+                    historyRestoringSessionId = '';
+                    historyDeletingSessionId = '';
+                    historyClearingAll = false;
+                    historyOpenMenuSessionId = '';
                     clearPersistedConversationState();
 
                     if (profileNameInput) profileNameInput.value = '';
@@ -3668,99 +4380,361 @@
             });
         }
 
-        async function loadHistory() {
-            const listContainer = shadowRoot.getElementById('sc-history-list');
-            if (!listContainer) return;
+        function getHistorySearchText(session = {}) {
+            const parts = [
+                formatHistoryPreview(session),
+                session.lastMessagePreview,
+                session.lastUserMessage,
+                session.lastAssistantMessage,
+                formatHistoryLocation(session.url),
+                session.url
+            ];
+
+            return Array.from(new Set(parts.filter((value) => isNonEmptyString(value))))
+                .join('\n')
+                .toLowerCase();
+        }
+
+        function syncHistoryControls({ focusSearch = false } = {}) {
+            if (historySearchWrap) {
+                historySearchWrap.hidden = !historySearchOpen;
+            }
+
+            if (historySearchToggleBtn) {
+                historySearchToggleBtn.classList.toggle('active', historySearchOpen || !!historySearchQuery.trim());
+                historySearchToggleBtn.setAttribute('aria-expanded', historySearchOpen ? 'true' : 'false');
+                historySearchToggleBtn.disabled = historyClearingAll;
+                historySearchToggleBtn.setAttribute('title', historySearchOpen ? 'Hide search' : 'Search history');
+                historySearchToggleBtn.setAttribute('aria-label', historySearchOpen ? 'Hide search' : 'Search history');
+            }
+
+            if (historySearchInput) {
+                if (historySearchInput.value !== historySearchQuery) {
+                    historySearchInput.value = historySearchQuery;
+                }
+                historySearchInput.disabled = historyLoading || historyClearingAll;
+                if (focusSearch && historySearchOpen) {
+                    requestAnimationFrame(() => {
+                        historySearchInput.focus();
+                        historySearchInput.select();
+                    });
+                }
+            }
+
+            if (historyClearBtn) {
+                historyClearBtn.disabled = historyLoading || historyClearingAll || !historySessions.length;
+                historyClearBtn.setAttribute('title', historyClearingAll ? 'Clearing history...' : 'Clear all conversations');
+            }
+        }
+
+        function getFilteredHistorySessions() {
+            const normalizedQuery = historySearchQuery.trim().toLowerCase();
+            if (!normalizedQuery) {
+                return historySessions;
+            }
+
+            return historySessions.filter((session) => getHistorySearchText(session).includes(normalizedQuery));
+        }
+
+        function renderHistoryState(message, className = 'sc-empty') {
+            if (!historyList) return;
+            historyList.innerHTML = `<div class="${className}">${escapeHtml(message)}</div>`;
+        }
+
+        function renderHistoryList() {
+            syncHistoryControls();
+            if (!historyList) return;
 
             if (!isAuthenticated()) {
-                listContainer.innerHTML = '<div class="sc-empty">Sign in with Google to view history.</div>';
+                renderHistoryState('Sign in with Google to view history.');
+                return;
+            }
+
+            if (historyClearingAll) {
+                renderHistoryState('Clearing history...', 'sc-loading');
+                return;
+            }
+
+            if (historyLoading) {
+                renderHistoryState('Loading history...', 'sc-loading');
+                return;
+            }
+
+            if (!historySessions.length) {
+                renderHistoryState(historyErrorMessage || 'No history found.', historyErrorMessage ? 'sc-error' : 'sc-empty');
+                return;
+            }
+
+            const filteredSessions = getFilteredHistorySessions();
+            if (!filteredSessions.length) {
+                renderHistoryState(historyErrorMessage || 'No conversations match your search.', historyErrorMessage ? 'sc-error' : 'sc-empty');
+                return;
+            }
+
+            const historyChevronIconUrl = getUiSvgUrl('chevron-right.svg');
+            historyList.innerHTML = '';
+
+            if (historyErrorMessage) {
+                const errorState = document.createElement('div');
+                errorState.className = 'sc-error';
+                errorState.textContent = historyErrorMessage;
+                historyList.appendChild(errorState);
+            }
+
+            filteredSessions.forEach((session) => {
+                const item = document.createElement('div');
+                const isRestoreBusy = historyRestoringSessionId === session.id;
+                const isDeleteBusy = historyDeletingSessionId === session.id;
+                const isMenuOpen = historyOpenMenuSessionId === session.id || isDeleteBusy;
+                const isBusy = historyClearingAll || isRestoreBusy || isDeleteBusy;
+                const locationLabel = formatHistoryLocation(session.url);
+                const titleLabel = locationLabel || 'Unknown page';
+                const statusLabel = isDeleteBusy
+                    ? 'Deleting conversation...'
+                    : (isRestoreBusy ? 'Opening conversation...' : formatHistoryDate(session.updatedAt));
+
+                item.className = `sc-history-item${isMenuOpen ? ' is-menu-open' : ''}`;
+
+                const mainBtn = document.createElement('button');
+                mainBtn.className = 'sc-history-main';
+                mainBtn.type = 'button';
+                mainBtn.disabled = isBusy;
+                mainBtn.setAttribute('aria-label', 'Open conversation');
+
+                const info = document.createElement('div');
+                info.className = 'sc-history-info';
+
+                const title = document.createElement('span');
+                title.className = 'sc-history-domain';
+                title.textContent = titleLabel;
+                info.appendChild(title);
+
+                const date = document.createElement('span');
+                date.className = 'sc-history-date';
+                date.textContent = statusLabel;
+                info.appendChild(date);
+
+                mainBtn.appendChild(info);
+                mainBtn.addEventListener('click', () => {
+                    restoreSession(session.id, session.url, session.updatedAt);
+                });
+                item.appendChild(mainBtn);
+
+                const actions = document.createElement('div');
+                actions.className = 'sc-history-actions';
+
+                const menuBtn = document.createElement('button');
+                menuBtn.className = `sc-history-open${isMenuOpen ? ' active' : ''}`;
+                menuBtn.type = 'button';
+                menuBtn.disabled = isBusy;
+                menuBtn.setAttribute('aria-label', isMenuOpen ? 'Hide delete option' : 'Show delete option');
+                menuBtn.setAttribute('aria-expanded', isMenuOpen ? 'true' : 'false');
+                menuBtn.innerHTML = `
+                    <img src="${historyChevronIconUrl}" class="sc-history-open-icon" alt="" aria-hidden="true">
+                `;
+                bindPressScale(menuBtn);
+                menuBtn.addEventListener('click', (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    historyOpenMenuSessionId = isMenuOpen ? '' : session.id;
+                    renderHistoryList();
+                });
+                actions.appendChild(menuBtn);
+
+                if (isMenuOpen) {
+                    const deleteBtn = document.createElement('button');
+                    deleteBtn.className = 'sc-history-delete';
+                    deleteBtn.type = 'button';
+                    deleteBtn.disabled = isBusy;
+                    deleteBtn.textContent = isDeleteBusy ? 'Deleting...' : 'Delete';
+                    deleteBtn.setAttribute('aria-label', 'Delete this conversation');
+                    bindPressScale(deleteBtn);
+                    deleteBtn.addEventListener('click', (event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        deleteHistorySession(session);
+                    });
+                    actions.appendChild(deleteBtn);
+                }
+
+                item.appendChild(actions);
+                historyList.appendChild(item);
+            });
+        }
+
+        async function loadHistory() {
+            if (!historyList) return;
+
+            if (!isAuthenticated()) {
+                historySessions = [];
+                historyErrorMessage = '';
+                renderHistoryList();
                 setActivePane('auth');
                 return;
             }
 
-            listContainer.innerHTML = '<div class="sc-loading">Loading history...</div>';
+            historyLoading = true;
+            historyErrorMessage = '';
+            historyOpenMenuSessionId = '';
+            renderHistoryList();
 
             try {
-                const response = await apiFetch('/api/history');
+                const response = await apiFetch(`/api/history?limit=${HISTORY_FETCH_LIMIT}`);
                 if (!response.ok) {
                     if (isUnauthorizedResponse(response)) {
                         requireAuthenticationUi('Please sign in again to load history.');
-                        listContainer.innerHTML = '<div class="sc-empty">Sign in with Google to view history.</div>';
+                        historySessions = [];
+                        historyErrorMessage = '';
+                        renderHistoryList();
                         return;
                     }
                     throw new Error(await getApiErrorMessage(response, 'Failed to load history'));
                 }
 
                 const data = await response.json();
-
-                if (data.sessions && data.sessions.length > 0) {
-                    listContainer.innerHTML = '';
-                    data.sessions.forEach((session) => {
-                        const item = document.createElement('div');
-                        item.className = 'sc-history-item';
-                        const dateStr = session.updatedAt ? new Date(session.updatedAt).toLocaleString() : 'Unknown date';
-                        const locationLabel = formatHistoryLocation(session.url);
-                        const deviceLabel = isNonEmptyString(session.deviceLabel) ? session.deviceLabel.trim() : 'Saved device';
-                        const previewLabel = formatHistoryPreview(session);
-                        item.innerHTML = `
-                            <div class="sc-history-info">
-                                <span class="sc-history-domain">${escapeHtml(locationLabel)}</span>
-                                <span class="sc-history-device">${escapeHtml(deviceLabel)}</span>
-                                <span class="sc-history-preview">${escapeHtml(previewLabel)}</span>
-                                <span class="sc-history-date">${dateStr}</span>
-                            </div>
-                            <button class="sc-history-open" title="Open Conversation">Open</button>
-                        `;
-                        const openBtn = item.querySelector('.sc-history-open');
-                        openBtn?.addEventListener('click', () => restoreSession(session.id, session.url, session.updatedAt));
-                        listContainer.appendChild(item);
-                    });
-                } else {
-                    listContainer.innerHTML = '<div class="sc-empty">No history found.</div>';
-                }
+                historySessions = Array.isArray(data?.sessions) ? data.sessions : [];
             } catch (e) {
                 console.error('[History] Load error:', e);
-                listContainer.innerHTML = '<div class="sc-error">Failed to load history.</div>';
+                historyErrorMessage = e?.message || 'Failed to load history.';
+            } finally {
+                historyLoading = false;
+                renderHistoryList();
             }
         }
 
         async function restoreSession(sid, url, fallbackTimestamp = null) {
-            const listContainer = shadowRoot.getElementById('sc-history-list');
-            if (!listContainer) return;
+            if (!historyList || !sid || historyDeletingSessionId || historyClearingAll) return;
             if (!isAuthenticated()) {
                 setActivePane('auth');
                 return;
             }
-            const originalContent = listContainer.innerHTML;
-            listContainer.innerHTML = '<div class="sc-loading">Restoring chat...</div>';
+
+            historyRestoringSessionId = sid;
+            historyErrorMessage = '';
+            historyOpenMenuSessionId = '';
+            renderHistoryList();
 
             try {
                 const response = await apiFetch(`/api/history/messages?sessionId=${encodeURIComponent(sid)}`);
                 if (!response.ok) {
                     if (isUnauthorizedResponse(response)) {
                         requireAuthenticationUi('Please sign in again to restore this chat.');
-                        listContainer.innerHTML = originalContent;
                         return;
                     }
                     throw new Error(await getApiErrorMessage(response, 'Failed to restore session'));
                 }
                 const data = await response.json();
 
-                if (data.history) {
-                    applyConversationState({
-                        sessionId: data?.session?.id || sid,
-                        sessionUrl: data?.session?.url || url || 'restored_session',
-                        history: data.history,
-                        updatedAt: data?.session?.updatedAt || fallbackTimestamp,
-                        persist: true,
-                        withTypewriter: false
-                    });
-                    openPane('chat');
+                if (!Array.isArray(data?.history)) {
+                    throw new Error('History payload was invalid');
+                }
+
+                applyConversationState({
+                    sessionId: data?.session?.id || sid,
+                    sessionUrl: data?.session?.url || url || 'restored_session',
+                    history: data.history,
+                    updatedAt: data?.session?.updatedAt || fallbackTimestamp,
+                    persist: true,
+                    withTypewriter: false
+                });
+                openPane('chat');
+            } catch (e) {
+                console.error('[History] Restore failed:', e);
+                historyErrorMessage = e?.message || 'Failed to restore this session.';
+                renderHistoryList();
+                addMessage('Failed to restore this session.', 'ai');
+            } finally {
+                historyRestoringSessionId = '';
+                renderHistoryList();
+            }
+        }
+
+        async function deleteHistorySession(session) {
+            if (!session?.id || historyDeletingSessionId || historyRestoringSessionId || historyClearingAll) return;
+            if (!isAuthenticated()) {
+                setActivePane('auth');
+                return;
+            }
+
+            const sessionLabel = formatHistoryLocation(session.url);
+            const confirmationLabel = sessionLabel.length > 140
+                ? `${sessionLabel.slice(0, 137)}...`
+                : sessionLabel;
+            if (!window.confirm(`Delete this conversation?\n\n${confirmationLabel}`)) {
+                return;
+            }
+
+            historyDeletingSessionId = session.id;
+            historyErrorMessage = '';
+            renderHistoryList();
+
+            try {
+                const response = await apiFetch(`/api/history/session?sessionId=${encodeURIComponent(session.id)}`, {
+                    method: 'DELETE'
+                });
+                if (!response.ok) {
+                    if (isUnauthorizedResponse(response)) {
+                        requireAuthenticationUi('Please sign in again to delete this conversation.');
+                        return;
+                    }
+                    throw new Error(await getApiErrorMessage(response, 'Failed to delete conversation'));
+                }
+
+                historySessions = historySessions.filter((historySession) => historySession.id !== session.id);
+                if (historyOpenMenuSessionId === session.id) {
+                    historyOpenMenuSessionId = '';
+                }
+                if (sessionId === session.id) {
+                    startNewSession(true, false);
                 }
             } catch (e) {
-                console.error('Restore failed', e);
-                listContainer.innerHTML = originalContent;
-                addMessage('Failed to restore this session.', 'ai');
+                console.error('[History] Delete failed:', e);
+                historyErrorMessage = e?.message || 'Failed to delete this conversation.';
+            } finally {
+                historyDeletingSessionId = '';
+                renderHistoryList();
+            }
+        }
+
+        async function clearAllHistory() {
+            if (!historySessions.length || historyLoading || historyRestoringSessionId || historyDeletingSessionId || historyClearingAll) return;
+            if (!isAuthenticated()) {
+                setActivePane('auth');
+                return;
+            }
+
+            if (!window.confirm('Delete all saved conversations?')) {
+                return;
+            }
+
+            historyClearingAll = true;
+            historyErrorMessage = '';
+            historyOpenMenuSessionId = '';
+            renderHistoryList();
+
+            try {
+                const response = await apiFetch('/api/history', { method: 'DELETE' });
+                if (!response.ok) {
+                    if (isUnauthorizedResponse(response)) {
+                        requireAuthenticationUi('Please sign in again to clear your history.');
+                        return;
+                    }
+                    throw new Error(await getApiErrorMessage(response, 'Failed to clear history'));
+                }
+
+                historySessions = [];
+                historySearchQuery = '';
+                historySearchOpen = false;
+                if (historySearchInput) {
+                    historySearchInput.value = '';
+                }
+                startNewSession(true, false);
+            } catch (e) {
+                console.error('[History] Clear failed:', e);
+                historyErrorMessage = e?.message || 'Failed to clear history.';
+            } finally {
+                historyClearingAll = false;
+                renderHistoryList();
             }
         }
 
@@ -3769,6 +4743,10 @@
                 if (!isAuthenticated()) {
                     setActivePane('auth');
                     setAuthStatus('Please sign in with Google to continue.', false);
+                    return;
+                }
+                if (uiState.activePane !== 'chat') {
+                    setActivePane('chat');
                     return;
                 }
                 startNewSession(true, false);
@@ -3782,10 +4760,19 @@
             });
         });
 
-        textarea.addEventListener('input', () => {
+        function resizeChatTextarea() {
+            if (!textarea) return;
+            const minHeight = 28;
+            const maxHeight = 140;
             textarea.style.height = 'auto';
-            textarea.style.height = Math.min(textarea.scrollHeight, 140) + 'px';
+            textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, minHeight), maxHeight)}px`;
+        }
+
+        textarea.addEventListener('input', () => {
+            resizeChatTextarea();
         });
+
+        resizeChatTextarea();
 
         const handleSend = async () => {
             if (!isAuthenticated()) {
@@ -3798,11 +4785,11 @@
             if (!text) return;
 
             textarea.value = '';
-            textarea.style.height = 'auto';
+            resizeChatTextarea();
             hasLocalConversationMutation = true;
 
             const userMessageTimestamp = new Date().toISOString();
-            addMessage(text, 'user', null, false, userMessageTimestamp);
+            addMessage(text, 'user', null, false, userMessageTimestamp, true);
 
             conversationHistory.push({ role: 'user', content: text, timestamp: userMessageTimestamp });
             sessionUpdatedAt = userMessageTimestamp;
@@ -3813,7 +4800,7 @@
             setInputState(false, 'Working...');
             syncQuickPromptsVisibility();
 
-            const loadingId = addLoadingMessage();
+            const loadingId = addLoadingMessage("Thinking...", true);
             let streamedMessageEl = null;
             let latestStreamText = '';
             let streamRenderPending = false;
@@ -3823,11 +4810,12 @@
 
             const renderStreamMessage = () => {
                 if (streamCancelled) return;
+                if (!latestStreamText && !streamedMessageEl) return;
                 if (!streamedMessageEl) {
                     removeMessage(loadingId);
                     streamedMessageEl = addMessage('', 'ai', null, true);
                 }
-                updateMessageContent(streamedMessageEl, latestStreamText);
+                updateMessageContent(streamedMessageEl, latestStreamText, null, { allowPartial: true });
             };
 
             const onPartialText = (partialReply) => {
@@ -4208,28 +5196,33 @@
         return renderMarkdown(text);
     }
 
-    function updateMessageContent(messageEl, text, imageUrl = null) {
+    function updateMessageContent(messageEl, text, imageUrl = null, { forceScroll = false, allowPartial = false } = {}) {
         if (!messageEl) return;
         const bubble = messageEl.querySelector('.sc-bubble');
         if (!bubble) return;
+        const messagesArea = shadowRoot?.getElementById('sc-messages');
+        const shouldAutoScroll = forceScroll || (
+            messageEl.isConnected &&
+            isElementNearScrollBottom(messagesArea)
+        );
 
         const attachmentHtml = imageUrl
             ? `<div class="sc-attachment"><img src="${imageUrl}" alt="Screenshot"></div>`
             : '';
         const normalizedText = messageEl.classList.contains('ai')
-            ? cleanAiReply(text)
+            ? cleanAiReply(text, { allowPartial })
             : (typeof text === 'string' ? text : String(text ?? ''));
         const formattedText = formatMessageContent(normalizedText);
         bubble.innerHTML = `${formattedText}${attachmentHtml}`;
 
-        const messagesArea = shadowRoot?.getElementById('sc-messages');
-        if (messagesArea) {
-            messagesArea.scrollTop = messagesArea.scrollHeight;
+        if (shouldAutoScroll) {
+            scrollMessagesToBottom({ force: true });
         }
     }
 
-    function addMessage(text, type, imageUrl = null, skipSave = false, timestamp = Date.now()) {
+    function addMessage(text, type, imageUrl = null, skipSave = false, timestamp = Date.now(), forceScroll = false) {
         const messagesArea = shadowRoot.getElementById('sc-messages');
+        const shouldAutoScroll = forceScroll || isElementNearScrollBottom(messagesArea);
         const msgDiv = document.createElement('div');
         msgDiv.className = `sc-message ${type}`;
 
@@ -4242,7 +5235,9 @@
         updateMessageContent(msgDiv, text, imageUrl);
 
         messagesArea.appendChild(msgDiv);
-        messagesArea.scrollTop = messagesArea.scrollHeight;
+        if (shouldAutoScroll) {
+            scrollMessagesToBottom({ force: true });
+        }
         syncQuickPromptsVisibility();
         return msgDiv;
     }
@@ -4250,8 +5245,7 @@
     function toggleUI() {
         if (!container) return;
         if (uiState.mode === 'hidden') {
-            setUiMode('open');
-            setActivePane('chat');
+            openUiFromActivation();
             return;
         }
 
@@ -4953,7 +5947,7 @@
     }
 
     // UI Helpers
-    function setInputState(enabled, placeholder = "Type a message...") {
+    function setInputState(enabled, placeholder = "Ask me anything...") {
         const textarea = shadowRoot.getElementById('sc-chat-input');
         const sendBtn = shadowRoot.getElementById('sc-send');
         if (textarea && sendBtn) {
@@ -4962,13 +5956,13 @@
             textarea.placeholder = placeholder;
             if (enabled) {
                 textarea.focus();
-                if (placeholder === "Type a message...") textarea.placeholder = "Type a message...";
             }
         }
     }
 
-    function addLoadingMessage(text = "Thinking...") {
+    function addLoadingMessage(text = "Thinking...", forceScroll = false) {
         const messagesArea = shadowRoot.getElementById('sc-messages');
+        const shouldAutoScroll = forceScroll || isElementNearScrollBottom(messagesArea);
         const msgDiv = document.createElement('div');
         const id = 'loading-' + Date.now();
         const shimmerSpreadPx = Math.max(24, text.length * 3);
@@ -4984,7 +5978,9 @@
             </div>
         `;
         messagesArea.appendChild(msgDiv);
-        messagesArea.scrollTop = messagesArea.scrollHeight;
+        if (shouldAutoScroll) {
+            scrollMessagesToBottom({ force: true });
+        }
         return id;
     }
 
