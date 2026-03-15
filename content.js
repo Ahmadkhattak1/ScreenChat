@@ -1021,33 +1021,38 @@
         throw new Error('Google sign-in timed out. Please try again.');
     }
 
+    async function requestRefreshedAuthSession(refreshToken = getRefreshToken()) {
+        const normalizedRefreshToken = isNonEmptyString(refreshToken) ? refreshToken.trim() : '';
+        if (!normalizedRefreshToken) return null;
+
+        const requestUrl = await apiUrl('/api/auth/refresh');
+        const response = await fetchWithProxyFallback(requestUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ refreshToken: normalizedRefreshToken })
+        });
+
+        if (!response.ok) {
+            return null;
+        }
+
+        const payload = await response.json().catch(() => null);
+        return normalizeStoredAuthSession({
+            authToken: isNonEmptyString(payload?.authToken) ? payload.authToken.trim() : '',
+            refreshToken: isNonEmptyString(payload?.refreshToken)
+                ? payload.refreshToken.trim()
+                : normalizedRefreshToken,
+            user: payload?.user
+        });
+    }
+
     async function refreshAuthSession() {
         const currentSession = normalizeStoredAuthSession(authSession);
         if (!currentSession?.refreshToken) return null;
         if (authRefreshPromise) return authRefreshPromise;
 
         authRefreshPromise = (async () => {
-            const requestUrl = await apiUrl('/api/auth/refresh');
-            const response = await fetchWithProxyFallback(requestUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ refreshToken: currentSession.refreshToken })
-            });
-
-            if (!response.ok) {
-                clearAuthSession();
-                return null;
-            }
-
-            const payload = await response.json().catch(() => null);
-            const nextSession = normalizeStoredAuthSession({
-                authToken: isNonEmptyString(payload?.authToken) ? payload.authToken.trim() : '',
-                refreshToken: isNonEmptyString(payload?.refreshToken)
-                    ? payload.refreshToken.trim()
-                    : currentSession.refreshToken,
-                user: payload?.user
-            });
-
+            const nextSession = await requestRefreshedAuthSession(currentSession.refreshToken);
             if (!nextSession) {
                 clearAuthSession();
                 return null;
@@ -3428,6 +3433,18 @@
 
             (async () => {
                 try {
+                    if (storedAuthSession?.refreshToken) {
+                        const refreshedSession = await requestRefreshedAuthSession(storedAuthSession.refreshToken).catch((error) => {
+                            console.warn('[Auth] Stored session refresh failed:', error);
+                            return null;
+                        });
+                        if (refreshedSession) {
+                            setAuthSession(refreshedSession);
+                            setAuthStatus('');
+                            return;
+                        }
+                    }
+
                     const response = await apiFetch('/api/auth/me');
                     if (!response.ok) {
                         if (isUnauthorizedResponse(response)) {
@@ -4282,8 +4299,22 @@
             setAuthStatus('Opening Google sign-in...', false);
 
             try {
-                const nextSession = await beginHostedGoogleSignIn();
+                let nextSession = await beginHostedGoogleSignIn();
+                setAuthStatus('Finalizing sign-in...', false);
                 setAuthSession(nextSession);
+
+                if (nextSession?.refreshToken) {
+                    const refreshedSession = await requestRefreshedAuthSession(nextSession.refreshToken).catch((error) => {
+                        console.warn('[Auth] Immediate session refresh failed:', error);
+                        return null;
+                    });
+                    if (refreshedSession) {
+                        nextSession = refreshedSession;
+                        setAuthSession(nextSession);
+                    } else {
+                        setAuthSession(nextSession);
+                    }
+                }
 
                 setAuthStatus('');
                 syncAuthUi();
