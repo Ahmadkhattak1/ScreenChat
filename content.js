@@ -3386,12 +3386,19 @@
             const cachedProfileIdentity = normalizeProfileIdentity(result[PROFILE_CACHE_KEY]) || readProfileIdentityFromLocalStorage();
             if (cachedProfileIdentity) {
                 persistProfileIdentity(cachedProfileIdentity);
+                const initialProfileInputs = {
+                    profileNameInput: shadowRoot?.getElementById('sc-profile-name'),
+                    profileNicknameInput: shadowRoot?.getElementById('sc-profile-nickname'),
+                    profileEmailInput: shadowRoot?.getElementById('sc-profile-email'),
+                    profilePhoneInput: shadowRoot?.getElementById('sc-profile-phone'),
+                    profileNotesInput: shadowRoot?.getElementById('sc-profile-notes')
+                };
                 userProfile = applyProfileFormValues({
-                    profileNameInput,
-                    profileNicknameInput,
-                    profileEmailInput,
-                    profilePhoneInput,
-                    profileNotesInput
+                    profileNameInput: initialProfileInputs.profileNameInput,
+                    profileNicknameInput: initialProfileInputs.profileNicknameInput,
+                    profileEmailInput: initialProfileInputs.profileEmailInput,
+                    profilePhoneInput: initialProfileInputs.profilePhoneInput,
+                    profileNotesInput: initialProfileInputs.profileNotesInput
                 }, {
                     fullName: cachedProfileIdentity.fullName || '',
                     nickname: '',
