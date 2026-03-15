@@ -231,6 +231,31 @@ function Test-ContentScanEligible {
     return $true
 }
 
+function Test-EnvAssignmentScanEligible {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath
+    )
+
+    $name = [System.IO.Path]::GetFileName($FilePath)
+    if ($name.StartsWith('.env', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+
+    $extension = [System.IO.Path]::GetExtension($FilePath)
+    return $extension -in @(
+        '.bash',
+        '.bat',
+        '.cmd',
+        '.conf',
+        '.env',
+        '.ini',
+        '.properties',
+        '.sh',
+        '.zsh'
+    )
+}
+
 function Get-FileText {
     param(
         [Parameter(Mandatory = $true)]
@@ -252,6 +277,8 @@ function Get-FileText {
 function Scan-FileContents {
     param(
         [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+        [Parameter(Mandatory = $true)]
         [AllowEmptyString()]
         [string]$Text
     )
@@ -270,14 +297,16 @@ function Scan-FileContents {
         }
     }
 
-    foreach ($line in ($Text -split "\r?\n")) {
-        if ($line -match '^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=\s*(.*)$') {
-            $name = $Matches[1]
-            $value = Normalize-AssignedValue -RawValue $Matches[2]
-            $reason = Get-SecretEnvReason -Name $name
+    if (Test-EnvAssignmentScanEligible -FilePath $FilePath) {
+        foreach ($line in ($Text -split "\r?\n")) {
+            if ($line -match '^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=\s*(.*)$') {
+                $name = $Matches[1]
+                $value = Normalize-AssignedValue -RawValue $Matches[2]
+                $reason = Get-SecretEnvReason -Name $name
 
-            if ($reason -and -not (Test-PlaceholderValue -Value $value)) {
-                [void]$reasons.Add("$reason assigned to $name")
+                if ($reason -and -not (Test-PlaceholderValue -Value $value)) {
+                    [void]$reasons.Add("$reason assigned to $name")
+                }
             }
         }
     }
@@ -302,7 +331,7 @@ foreach ($filePath in (Get-CandidateFiles)) {
     }
 
     $text = Get-FileText -FilePath $filePath
-    foreach ($reason in (Scan-FileContents -Text $text)) {
+    foreach ($reason in (Scan-FileContents -FilePath $filePath -Text $text)) {
         $failures.Add([pscustomobject]@{
                 FilePath = $filePath
                 Reason = $reason

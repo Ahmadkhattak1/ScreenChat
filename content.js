@@ -2017,7 +2017,7 @@
     const ATTACH_SCREEN_KEY = 'sc_attach_screen_enabled';
     const PROFILE_NUDGE_OPT_OUT_KEY = 'sc_profile_nudge_opt_out';
     const ATTACH_GLOW_OVERLAY_ID = 'sc-attach-glow-overlay';
-    const ATTACH_GLOW_ANIMATION_MS = 800;
+    const ATTACH_GLOW_ANIMATION_MS = 1400;
     const DEFAULT_PANEL_WIDTH = 382;
     const DEFAULT_PANEL_HEIGHT = 684;
     const PREVIOUS_DEFAULT_PANEL_WIDTH = 462;
@@ -3126,6 +3126,7 @@
 
     function ensureAttachGlowOverlay() {
         let overlay = shadowRoot?.getElementById(ATTACH_GLOW_OVERLAY_ID);
+        overlay?.querySelector('.sc-attach-glow-badge')?.remove();
         if (overlay) return overlay;
 
         if (!shadowRoot) return null;
@@ -3133,28 +3134,6 @@
         overlay = document.createElement('div');
         overlay.id = ATTACH_GLOW_OVERLAY_ID;
         overlay.setAttribute('aria-hidden', 'true');
-
-        const badge = document.createElement('div');
-        badge.className = 'sc-attach-glow-badge';
-
-        const badgeIcon = document.createElement('span');
-        badgeIcon.className = 'sc-attach-glow-badge-icon';
-        badgeIcon.setAttribute('aria-hidden', 'true');
-
-        const badgeCopy = document.createElement('div');
-        badgeCopy.className = 'sc-attach-glow-badge-copy';
-
-        const badgeTitle = document.createElement('span');
-        badgeTitle.className = 'sc-attach-glow-badge-title';
-        badgeTitle.textContent = 'Screen attached';
-
-        const badgeSubtitle = document.createElement('span');
-        badgeSubtitle.className = 'sc-attach-glow-badge-subtitle';
-        badgeSubtitle.textContent = 'Next reply can use this view';
-
-        badgeCopy.append(badgeTitle, badgeSubtitle);
-        badge.append(badgeIcon, badgeCopy);
-        overlay.appendChild(badge);
         shadowRoot.appendChild(overlay);
         return overlay;
     }
