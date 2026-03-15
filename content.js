@@ -42,6 +42,8 @@
     const TIMESTAMP_REFRESH_INTERVAL_MS = 60000;
     const WEB_SIGN_IN_POLL_INTERVAL_MS = 900;
     const WEB_SIGN_IN_TIMEOUT_MS = 3 * 60 * 1000;
+    const HOSTED_SIGN_IN_MESSAGE_TYPE = 'screenchat_google_auth_linked';
+    const HOSTED_SIGN_IN_CLOSED_MESSAGE_TYPE = 'screenchat_google_auth_closed';
     const RELATIVE_TIME_FORMATTER = typeof Intl !== 'undefined' && typeof Intl.RelativeTimeFormat === 'function'
         ? new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' })
         : null;
@@ -821,6 +823,204 @@
         return new Promise((resolve) => setTimeout(resolve, ms));
     }
 
+    function createSignalWaiter() {
+        let hasPendingSignal = false;
+        let activeWaiter = null;
+
+        return {
+            notify() {
+                if (activeWaiter) {
+                    const resolveWaiter = activeWaiter;
+                    activeWaiter = null;
+                    resolveWaiter('signal');
+                    return;
+                }
+
+                hasPendingSignal = true;
+            },
+            wait(timeoutMs) {
+                if (hasPendingSignal) {
+                    hasPendingSignal = false;
+                    return Promise.resolve('signal');
+                }
+
+                return new Promise((resolve) => {
+                    const timeoutId = setTimeout(() => {
+                        if (activeWaiter === finishWait) {
+                            activeWaiter = null;
+                        }
+                        resolve('timeout');
+                    }, timeoutMs);
+
+                    const finishWait = (reason = 'signal') => {
+                        clearTimeout(timeoutId);
+                        if (activeWaiter === finishWait) {
+                            activeWaiter = null;
+                        }
+                        hasPendingSignal = false;
+                        resolve(reason);
+                    };
+
+                    activeWaiter = finishWait;
+                });
+            }
+        };
+    }
+
+    async function createHostedGoogleSignInAttempt() {
+        const response = await apiFetch(
+            '/api/auth/start',
+            { method: 'POST', headers: { 'Content-Type': 'application/json' } },
+            { includeAuth: false }
+        );
+
+        if (!response.ok) {
+            throw new Error(await getApiErrorMessage(response, 'Failed to start Google sign-in'));
+        }
+
+        const payload = await response.json().catch(() => null);
+        const tempId = isNonEmptyString(payload?.tempId) ? payload.tempId.trim() : '';
+        if (!tempId) {
+            throw new Error('Google sign-in backend did not return a session ID');
+        }
+
+        return tempId;
+    }
+
+    async function loadHostedGoogleSignInStatus(tempId, { consume = false } = {}) {
+        if (!isNonEmptyString(tempId)) return null;
+
+        const searchParams = new URLSearchParams({ tempId: tempId.trim() });
+        if (consume) {
+            searchParams.set('consume', '1');
+        }
+        const statusResponse = await apiFetch(
+            `/api/auth/status?${searchParams.toString()}`,
+            { method: 'GET' },
+            { includeAuth: false }
+        );
+
+        if (!statusResponse.ok) {
+            return null;
+        }
+
+        const statusPayload = await statusResponse.json().catch(() => null);
+        const session = normalizeStoredAuthSession({
+            authToken: statusPayload?.authToken,
+            refreshToken: statusPayload?.refreshToken,
+            user: statusPayload?.user
+        });
+
+        return {
+            status: isNonEmptyString(statusPayload?.status) ? statusPayload.status.trim().toLowerCase() : '',
+            session: statusPayload?.linked && session ? session : null,
+            error: isNonEmptyString(statusPayload?.error) ? statusPayload.error.trim() : ''
+        };
+    }
+
+    async function cancelHostedGoogleSignInAttempt(tempId) {
+        if (!isNonEmptyString(tempId)) return;
+
+        await apiFetch(
+            '/api/auth/cancel',
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ tempId: tempId.trim() })
+            },
+            { includeAuth: false }
+        ).catch(() => null);
+    }
+
+    function getHostedGoogleSignInSessionFromMessage(payload, expectedTempId) {
+        if (!payload || typeof payload !== 'object') return null;
+        if (payload.type !== HOSTED_SIGN_IN_MESSAGE_TYPE) return null;
+        if (!isNonEmptyString(payload.tempId) || payload.tempId.trim() !== expectedTempId) return null;
+
+        return normalizeStoredAuthSession({
+            authToken: payload.authToken,
+            refreshToken: payload.refreshToken,
+            user: payload.user
+        });
+    }
+
+    function isHostedGoogleSignInClosedMessage(payload, expectedTempId) {
+        if (!payload || typeof payload !== 'object') return false;
+        if (payload.type !== HOSTED_SIGN_IN_CLOSED_MESSAGE_TYPE) return false;
+        return isNonEmptyString(payload.tempId) && payload.tempId.trim() === expectedTempId;
+    }
+
+    async function waitForHostedGoogleSignInResult(tempId, popup) {
+        const signalWaiter = createSignalWaiter();
+        let directSession = null;
+        let popupWasClosed = false;
+        let popupCloseWasCancelled = false;
+        const onHostedSignInMessage = (event) => {
+            if (!allowedApiBaseOrigins.has(event?.origin)) return;
+            const payload = event?.data && typeof event.data === 'object' ? event.data : null;
+            const nextSession = getHostedGoogleSignInSessionFromMessage(payload, tempId);
+            if (!nextSession && !isHostedGoogleSignInClosedMessage(payload, tempId)) return;
+            if (nextSession) {
+                directSession = nextSession;
+            } else {
+                popupWasClosed = true;
+            }
+            signalWaiter.notify();
+        };
+
+        window.addEventListener('message', onHostedSignInMessage);
+
+        try {
+            const startedAt = Date.now();
+            const deadline = Date.now() + WEB_SIGN_IN_TIMEOUT_MS;
+            while (Date.now() < deadline) {
+                if (directSession) {
+                    await loadHostedGoogleSignInStatus(tempId, { consume: true }).catch(() => null);
+                    return directSession;
+                }
+
+                const statusSnapshot = await loadHostedGoogleSignInStatus(tempId, { consume: true });
+                if (statusSnapshot?.session) {
+                    return statusSnapshot.session;
+                }
+
+                if (!popupWasClosed && popup?.closed) {
+                    popupWasClosed = true;
+                }
+
+                if (popupWasClosed) {
+                    if (!popupCloseWasCancelled) {
+                        popupCloseWasCancelled = true;
+                        await cancelHostedGoogleSignInAttempt(tempId);
+                    }
+                    throw new Error('Google sign-in window was closed before completion.');
+                }
+
+                if (statusSnapshot?.status === 'cancelled') {
+                    throw new Error('Google sign-in window was closed before completion.');
+                }
+
+                if (statusSnapshot?.status === 'expired') {
+                    throw new Error('Google sign-in expired. Please try again.');
+                }
+
+                if (statusSnapshot?.status === 'missing' && (Date.now() - startedAt) > 8000) {
+                    throw new Error('Google sign-in session was lost. Please try again.');
+                }
+
+                if (statusSnapshot?.status === 'error' && statusSnapshot.error) {
+                    throw new Error(statusSnapshot.error);
+                }
+
+                await signalWaiter.wait(WEB_SIGN_IN_POLL_INTERVAL_MS);
+            }
+        } finally {
+            window.removeEventListener('message', onHostedSignInMessage);
+        }
+
+        throw new Error('Google sign-in timed out. Please try again.');
+    }
+
     async function refreshAuthSession() {
         const currentSession = normalizeStoredAuthSession(authSession);
         if (!currentSession?.refreshToken) return null;
@@ -865,7 +1065,7 @@
     async function beginHostedGoogleSignIn() {
         await ensureHostedGoogleAuthBackendReady();
         const baseUrl = await resolveApiBaseUrl();
-        const tempId = `auth_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+        const tempId = await createHostedGoogleSignInAttempt();
         const loginUrl = `${baseUrl}/google-login.html?tempId=${encodeURIComponent(tempId)}`;
         const popup = window.open(loginUrl, 'screenchat-google-signin', 'popup=yes,width=520,height=720');
 
@@ -879,38 +1079,7 @@
             // No-op.
         }
 
-        const deadline = Date.now() + WEB_SIGN_IN_TIMEOUT_MS;
-        while (Date.now() < deadline) {
-            const statusResponse = await apiFetch(
-                `/api/auth/status?tempId=${encodeURIComponent(tempId)}`,
-                { method: 'GET' },
-                { includeAuth: false }
-            );
-
-            if (statusResponse.ok) {
-                const statusPayload = await statusResponse.json().catch(() => null);
-                const nextSession = normalizeStoredAuthSession({
-                    authToken: statusPayload?.authToken,
-                    refreshToken: statusPayload?.refreshToken,
-                    user: statusPayload?.user
-                });
-
-                if (statusPayload?.linked && nextSession) {
-                    try {
-                        popup.close();
-                    } catch {
-                        // No-op.
-                    }
-                    return nextSession;
-                }
-            }
-
-            if (popup.closed) {
-                throw new Error('Google sign-in window was closed before completion.');
-            }
-
-            await wait(WEB_SIGN_IN_POLL_INTERVAL_MS);
-        }
+        const nextSession = await waitForHostedGoogleSignInResult(tempId, popup);
 
         try {
             popup.close();
@@ -918,7 +1087,7 @@
             // No-op.
         }
 
-        throw new Error('Google sign-in timed out. Please try again.');
+        return nextSession;
     }
 
     async function apiFetch(path, options, { includeAuth = true } = {}) {
