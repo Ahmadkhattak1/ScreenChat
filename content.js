@@ -5965,16 +5965,16 @@
         const shouldAutoScroll = forceScroll || isElementNearScrollBottom(messagesArea);
         const msgDiv = document.createElement('div');
         const id = 'loading-' + Date.now();
-        const shimmerSpreadPx = Math.max(24, text.length * 3);
         msgDiv.id = id;
         msgDiv.className = 'sc-message ai loading-bubble';
-        // Port of 21st.dev ibelick Text Shimmer behavior (MIT) adapted to vanilla CSS/JS.
         msgDiv.innerHTML = `
-            <div class="sc-bubble">
-                <span
-                    class="sc-shimmer-text"
-                    style="--sc-shimmer-duration:1s;--sc-shimmer-spread:${shimmerSpreadPx}px;"
-                >${escapeHtml(text)}</span>
+            <div class="sc-bubble" aria-label="${escapeHtml(text)}" role="status">
+                <span class="sc-visually-hidden">${escapeHtml(text)}</span>
+                <span class="sc-typing-indicator" aria-hidden="true">
+                    <span class="sc-typing-dot"></span>
+                    <span class="sc-typing-dot"></span>
+                    <span class="sc-typing-dot"></span>
+                </span>
             </div>
         `;
         messagesArea.appendChild(msgDiv);
