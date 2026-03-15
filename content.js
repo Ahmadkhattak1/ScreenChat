@@ -984,10 +984,6 @@
                     return statusSnapshot.session;
                 }
 
-                if (!popupWasClosed && popup?.closed) {
-                    popupWasClosed = true;
-                }
-
                 if (popupWasClosed) {
                     if (!popupCloseWasCancelled) {
                         popupCloseWasCancelled = true;
