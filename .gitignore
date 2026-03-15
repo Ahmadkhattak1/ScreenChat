@@ -1,4 +1,35 @@
+# Local environment files
 .env
+.env.*
+!.env.example
+!.env*.example
+!.env*.sample
+!.env*.template
+.envrc
+
+# Build output
 dist/
+
+# Local credentials and machine-specific files
+.npmrc
+.git-credentials
+*.local
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+service-account*.json
+firebase-admin*.json
+credentials*.json
+secret*.json
+secrets*.json
+
+# OS cruft
 .DS_Store
 Thumbs.db

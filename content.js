@@ -33,6 +33,7 @@
     let isAuthSessionVerified = false;
     let isAuthRestoreInFlight = false;
     let attachScreenEnabled = false;
+    let attachGlowResetTimeout = 0;
     const API_BASE_CACHE_KEY = 'screenchat_api_base_url';
     const API_BASE_OVERRIDE_KEY = 'screenchat_api_base_override';
     const RUNTIME_CONFIG_URL = chrome.runtime.getURL('runtime-config.json');
@@ -1846,6 +1847,7 @@
     const ATTACH_SCREEN_KEY = 'sc_attach_screen_enabled';
     const PROFILE_NUDGE_OPT_OUT_KEY = 'sc_profile_nudge_opt_out';
     const ATTACH_GLOW_OVERLAY_ID = 'sc-attach-glow-overlay';
+    const ATTACH_GLOW_ANIMATION_MS = 800;
     const DEFAULT_PANEL_WIDTH = 382;
     const DEFAULT_PANEL_HEIGHT = 684;
     const PREVIOUS_DEFAULT_PANEL_WIDTH = 462;
@@ -2876,10 +2878,16 @@
         return chrome.runtime.getURL(`icons/svgs/${filename}`);
     }
 
+    function getAttachScreenControlLabel(isEnabled) {
+        return isEnabled ? 'Remove the attached screen' : 'Attach the screen';
+    }
+
     function getAttachScreenTooltip(isEnabled) {
-        return isEnabled
-            ? 'Attached: messages include a screenshot of this page'
-            : 'Detached: messages use text/context only';
+        return getAttachScreenControlLabel(isEnabled);
+    }
+
+    function getAttachScreenIconUrl(isEnabled) {
+        return getUiSvgUrl(isEnabled ? 'minus-square-muted.svg' : 'plus-square-Filled.svg');
     }
 
     function hasAnyProfileValue(profile) {
@@ -2955,6 +2963,28 @@
         overlay = document.createElement('div');
         overlay.id = ATTACH_GLOW_OVERLAY_ID;
         overlay.setAttribute('aria-hidden', 'true');
+
+        const badge = document.createElement('div');
+        badge.className = 'sc-attach-glow-badge';
+
+        const badgeIcon = document.createElement('span');
+        badgeIcon.className = 'sc-attach-glow-badge-icon';
+        badgeIcon.setAttribute('aria-hidden', 'true');
+
+        const badgeCopy = document.createElement('div');
+        badgeCopy.className = 'sc-attach-glow-badge-copy';
+
+        const badgeTitle = document.createElement('span');
+        badgeTitle.className = 'sc-attach-glow-badge-title';
+        badgeTitle.textContent = 'Screen attached';
+
+        const badgeSubtitle = document.createElement('span');
+        badgeSubtitle.className = 'sc-attach-glow-badge-subtitle';
+        badgeSubtitle.textContent = 'Next reply can use this view';
+
+        badgeCopy.append(badgeTitle, badgeSubtitle);
+        badge.append(badgeIcon, badgeCopy);
+        overlay.appendChild(badge);
         shadowRoot.appendChild(overlay);
         return overlay;
     }
@@ -2962,13 +2992,35 @@
     function playAttachGlowAnimation() {
         const overlay = ensureAttachGlowOverlay();
         if (!overlay) return;
+
+        if (attachGlowResetTimeout) {
+            window.clearTimeout(attachGlowResetTimeout);
+            attachGlowResetTimeout = 0;
+        }
+
         overlay.classList.remove('active');
         // Restart animation when user toggles repeatedly.
         void overlay.offsetWidth;
         overlay.classList.add('active');
-        overlay.addEventListener('animationend', () => {
+
+        let settled = false;
+        const onAnimationEnd = (event) => {
+            if (event.target !== overlay) return;
+            settle();
+        };
+        const settle = () => {
+            if (settled) return;
+            settled = true;
             overlay.classList.remove('active');
-        }, { once: true });
+            overlay.removeEventListener('animationend', onAnimationEnd);
+            if (attachGlowResetTimeout) {
+                window.clearTimeout(attachGlowResetTimeout);
+                attachGlowResetTimeout = 0;
+            }
+        };
+
+        overlay.addEventListener('animationend', onAnimationEnd);
+        attachGlowResetTimeout = window.setTimeout(settle, ATTACH_GLOW_ANIMATION_MS + 200);
     }
 
     function setAttachScreenEnabled(enabled, persist = true) {
@@ -2976,15 +3028,16 @@
         attachScreenEnabled = !!enabled;
         const attachToggle = shadowRoot?.getElementById('sc-attach-screen-toggle');
         const toggleIcon = attachToggle?.querySelector('.sc-attach-icon');
+        const controlLabel = getAttachScreenControlLabel(attachScreenEnabled);
         if (attachToggle) {
             attachToggle.classList.toggle('active', attachScreenEnabled);
             attachToggle.setAttribute('aria-pressed', attachScreenEnabled ? 'true' : 'false');
-            attachToggle.setAttribute('aria-label', attachScreenEnabled ? 'Remove attached screenshot' : 'Attach screenshot');
+            attachToggle.setAttribute('aria-label', controlLabel);
             attachToggle.setAttribute('data-tooltip', getAttachScreenTooltip(attachScreenEnabled));
-            attachToggle.setAttribute('title', attachScreenEnabled ? 'Remove attached screenshot' : 'Attach screenshot');
+            attachToggle.removeAttribute('title');
         }
         if (toggleIcon) {
-            toggleIcon.src = getUiSvgUrl(attachScreenEnabled ? 'minus-square-Filled.svg' : 'plus-square-Filled.svg');
+            toggleIcon.src = getAttachScreenIconUrl(attachScreenEnabled);
         }
 
         if (attachScreenEnabled && !wasEnabled && persist) {
@@ -3253,7 +3306,7 @@
         const profileIconUrl = getUiSvgUrl('user.svg');
         const closeIconUrl = getUiSvgUrl('times-square.svg');
         const backIconUrl = getUiSvgUrl('arrow-left.svg');
-        const attachIconUrl = getUiSvgUrl(attachScreenEnabled ? 'minus-square-Filled.svg' : 'plus-square-Filled.svg');
+        const attachIconUrl = getAttachScreenIconUrl(attachScreenEnabled);
         const sendIconUrl = getUiSvgUrl('send.svg');
         const toolbarTrashIconUrl = getUiSvgUrl('Icon Button.svg');
         const logoutIconUrl = getUiSvgUrl('Log out.svg');
@@ -3365,7 +3418,7 @@
                         <div class="sc-input-row">
                             <div class="sc-input-wrapper">
                                 <textarea class="sc-textarea" id="sc-chat-input" placeholder="Ask me anything..." rows="1"></textarea>
-                                <button class="sc-attach-toggle ${attachScreenEnabled ? 'active' : ''}" id="sc-attach-screen-toggle" type="button" title="${attachScreenEnabled ? 'Remove attached screenshot' : 'Attach screenshot'}" aria-label="${attachScreenEnabled ? 'Remove attached screenshot' : 'Attach screenshot'}" aria-pressed="${attachScreenEnabled ? 'true' : 'false'}" data-tooltip="${getAttachScreenTooltip(attachScreenEnabled)}">
+                                <button class="sc-attach-toggle ${attachScreenEnabled ? 'active' : ''}" id="sc-attach-screen-toggle" type="button" aria-label="${getAttachScreenControlLabel(attachScreenEnabled)}" aria-pressed="${attachScreenEnabled ? 'true' : 'false'}" data-tooltip="${getAttachScreenTooltip(attachScreenEnabled)}">
                                     <img src="${attachIconUrl}" class="sc-attach-icon" alt="" aria-hidden="true">
                                 </button>
                             </div>
@@ -5969,7 +6022,7 @@
         msgDiv.className = 'sc-message ai loading-bubble';
         msgDiv.innerHTML = `
             <div class="sc-bubble" aria-label="${escapeHtml(text)}" role="status">
-                <span class="sc-visually-hidden">${escapeHtml(text)}</span>
+                <span class="sc-sr-only">${escapeHtml(text)}</span>
                 <span class="sc-typing-indicator" aria-hidden="true">
                     <span class="sc-typing-dot"></span>
                     <span class="sc-typing-dot"></span>
