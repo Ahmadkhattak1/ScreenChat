@@ -2044,7 +2044,7 @@
     let uiState = { ...DEFAULT_UI_STATE };
     let hasTypedWelcome = false;
     let activePanelInteraction = null;
-    const HOTKEY_DEBUG_ENABLED = true;
+    const HOTKEY_DEBUG_ENABLED = false;
     const HOTKEY_REPEAT_GUARD_MS = 220;
     const HOTKEY_CROSS_SOURCE_GUARD_MS = 700;
     const HOTKEY_PAGE_FALLBACK_DELAY_MS = 340;
@@ -3383,11 +3383,14 @@
                 });
             }
 
+            // Always start from a fresh local chat session when the extension loads.
+            resetConversationState();
+
             const storedAuthSession = normalizeStoredAuthSession(result[AUTH_SESSION_KEY]);
             const hasStoredAuthSession = !!storedAuthSession;
-            // Stored session must be re-validated with backend before UI treats it as signed in.
-            setAuthSession(storedAuthSession, { persist: false, verified: false });
-            isAuthRestoreInFlight = hasStoredAuthSession;
+            // Do not block the UI on startup auth restoration; API requests already refresh tokens on demand.
+            setAuthSession(storedAuthSession, { persist: false, verified: hasStoredAuthSession });
+            isAuthRestoreInFlight = false;
 
             if (result.screenchat_user || result.messageCount) {
                 chrome.storage.local.remove(['screenchat_user', 'messageCount']);
@@ -3395,72 +3398,12 @@
 
             const messagesArea = shadowRoot.getElementById('sc-messages');
             if (messagesArea && !messagesArea.querySelector('.sc-message')) {
-                renderWelcomeMessage(hasStoredAuthSession);
-            }
-            const finalizeHydration = () => {
-                isAuthRestoreInFlight = false;
-                syncAuthUi();
-                syncQuickPromptsVisibility();
-                refreshProfileNudgeVisibility();
-            };
-
-            if (!hasStoredAuthSession) {
-                finalizeHydration();
-                return;
+                renderWelcomeMessage(false);
             }
 
-            setAuthStatus('Restoring your session...', false);
-            setActivePane('chat', false);
-            setInputState(false, 'Restoring your session...');
-
-            (async () => {
-                try {
-                    if (storedAuthSession?.refreshToken) {
-                        const refreshedSession = await requestRefreshedAuthSession(storedAuthSession.refreshToken).catch((error) => {
-                            console.warn('[Auth] Stored session refresh failed:', error);
-                            return null;
-                        });
-                        if (refreshedSession) {
-                            setAuthSession(refreshedSession);
-                            setAuthStatus('');
-                            return;
-                        }
-                    }
-
-                    const response = await apiFetch('/api/auth/me');
-                    if (!response.ok) {
-                        if (isUnauthorizedResponse(response)) {
-                            requireAuthenticationUi('Please sign in with Google to continue.');
-                            return;
-                        }
-                        throw new Error(await getApiErrorMessage(response, 'Failed to validate auth session'));
-                    }
-
-                    const payload = await response.json();
-                    const user = payload?.user && typeof payload.user === 'object' ? payload.user : null;
-                    if (!user?.id) {
-                        requireAuthenticationUi('Please sign in with Google to continue.');
-                        return;
-                    }
-
-                    setAuthSession({
-                        authToken: getAuthToken(),
-                        refreshToken: getRefreshToken(),
-                        user: {
-                            id: user.id,
-                            email: user.email || '',
-                            fullName: user.fullName || '',
-                            picture: user.picture || '',
-                            emailVerified: !!user.emailVerified
-                        }
-                    });
-                } catch (error) {
-                    console.warn('[Auth] Stored session validation failed:', error);
-                    requireAuthenticationUi('Please sign in with Google to continue.');
-                } finally {
-                    finalizeHydration();
-                }
-            })();
+            syncAuthUi();
+            syncQuickPromptsVisibility();
+            refreshProfileNudgeVisibility();
         });
     }
 
@@ -4278,7 +4221,7 @@
         async function handleGoogleSignIn() {
             if (isAwaitingResponse) return;
             setGoogleSignInState(true);
-            setAuthStatus('Opening Google sign-in...', false);
+            setAuthStatus('Complete Google sign-in in the Google window...', false);
 
             try {
                 let nextSession = await beginHostedGoogleSignIn();
@@ -5522,7 +5465,6 @@
             if (currentHTML === lastHTML) {
                 stableCount++;
                 if (stableCount >= requiredStableChecks) {
-                    console.log('[ScreenChat] UI stabilized after', Date.now() - startTime, 'ms');
                     return true;
                 }
             } else {
@@ -5531,7 +5473,6 @@
             }
         }
 
-        console.log('[ScreenChat] UI stabilization timeout, proceeding anyway');
         return false;
     }
 
@@ -5658,7 +5599,6 @@
                             const hasInputs = inner.querySelector('input, textarea, select, button');
                             if (hasInputs) {
                                 modalContent = inner;
-                                console.log('[Context] Found modal content via:', sel);
                                 break;
                             }
                         }
@@ -5678,7 +5618,6 @@
                         style.display !== 'none' &&
                         child.querySelector('input, textarea, button, h1, h2, h3')) {
                         modalContent = child;
-                        console.log('[Context] Found modal content by size/content heuristic');
                         break;
                     }
                 }
@@ -5695,9 +5634,7 @@
                 context.description = `Active ${context.type}`;
             }
 
-            // Log what we found for debugging
             const fieldCount = modalContent.querySelectorAll('input, textarea, select').length;
-            console.log(`[Context] Detected ${context.type} with ${fieldCount} form fields`);
         }
 
         return context;
@@ -5717,7 +5654,6 @@
         // If we're in a modal but found no inputs, the container detection might have been too narrow
         // Try searching the parent or the original modal overlay
         if (ctx.type !== 'page' && inputs.length === 0) {
-            console.log('[FormFields] No inputs in modal container, trying parent...');
             // Try parent element
             if (searchRoot.parentElement) {
                 inputs = searchRoot.parentElement.querySelectorAll('input, textarea, select, button');
@@ -5731,8 +5667,6 @@
                 }
             }
         }
-
-        console.log(`[FormFields] Found ${inputs.length} interactive elements in ${ctx.type}`);
 
         inputs.forEach((el, index) => {
             // Skip hidden or invisible elements

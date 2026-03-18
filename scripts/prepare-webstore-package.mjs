@@ -197,7 +197,7 @@ Generated: ${new Date().toISOString()}
 
 ## Privacy Answers
 
-- User data collected: Google sign-in details, page URL, visible page text, optional screenshots, saved chat history, and profile details supplied by the user.
+- User data collected: Google sign-in details, page URL, optional screenshots, saved chat history, and profile details supplied by the user.
 - User data shared with third parties: Google Firebase for authentication/storage and the configured AI provider for response generation.
 - Advertising: ScreenChat does not sell data and does not use data for personalized ads.
 

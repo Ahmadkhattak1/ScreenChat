@@ -1,9 +1,5 @@
 // Background Service Worker for ScreenChat
 
-chrome.runtime.onInstalled.addListener(() => {
-    console.log('ScreenChat extension installed');
-});
-
 const RUNTIME_CONFIG_URL = chrome.runtime.getURL('runtime-config.json');
 const HOTKEY_DEBUG_ENABLED = false;
 let hotkeyRequestCounter = 0;
