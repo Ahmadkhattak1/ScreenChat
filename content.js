@@ -2017,7 +2017,7 @@
     const ATTACH_SCREEN_KEY = 'sc_attach_screen_enabled';
     const PROFILE_NUDGE_OPT_OUT_KEY = 'sc_profile_nudge_opt_out';
     const ATTACH_GLOW_OVERLAY_ID = 'sc-attach-glow-overlay';
-    const ATTACH_GLOW_ANIMATION_MS = 1400;
+    const ATTACH_GLOW_ANIMATION_MS = 920;
     const DEFAULT_PANEL_WIDTH = 382;
     const DEFAULT_PANEL_HEIGHT = 684;
     const PREVIOUS_DEFAULT_PANEL_WIDTH = 462;
