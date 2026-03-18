@@ -44,6 +44,7 @@
     const WEB_SIGN_IN_TIMEOUT_MS = 3 * 60 * 1000;
     const HOSTED_SIGN_IN_MESSAGE_TYPE = 'screenchat_google_auth_linked';
     const HOSTED_SIGN_IN_CLOSED_MESSAGE_TYPE = 'screenchat_google_auth_closed';
+    const EXTENSION_CONTEXT_RECOVERY_MESSAGE = 'ScreenChat was updated in the background. Reload this tab and try signing in again.';
     const RELATIVE_TIME_FORMATTER = typeof Intl !== 'undefined' && typeof Intl.RelativeTimeFormat === 'function'
         ? new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' })
         : null;
@@ -331,6 +332,17 @@
         return typeof value === 'string' && value.trim().length > 0;
     }
 
+    function getErrorMessage(error) {
+        if (isNonEmptyString(error?.message)) return error.message.trim();
+        if (isNonEmptyString(error)) return error.trim();
+        return '';
+    }
+
+    function isExtensionContextInvalidatedError(error) {
+        const normalized = getErrorMessage(error).toLowerCase();
+        return normalized.includes('extension context invalidated') || normalized.includes('context invalidated');
+    }
+
     function getUserDisplayName(user) {
         if (isNonEmptyString(user?.fullName)) return user.fullName.trim();
         if (isNonEmptyString(user?.email)) return user.email.trim().split('@')[0];
@@ -395,9 +407,9 @@
         }
 
         if (identity) {
-            chrome.storage.local.set({ [PROFILE_CACHE_KEY]: identity });
+            storageSetSafe({ [PROFILE_CACHE_KEY]: identity });
         } else {
-            chrome.storage.local.remove([PROFILE_CACHE_KEY]);
+            storageRemoveSafe([PROFILE_CACHE_KEY]);
         }
 
         return identity;
@@ -487,9 +499,9 @@
 
         if (persist) {
             if (normalized) {
-                chrome.storage.local.set({ [AUTH_SESSION_KEY]: normalized });
+                storageSetSafe({ [AUTH_SESSION_KEY]: normalized });
             } else {
-                chrome.storage.local.remove([AUTH_SESSION_KEY]);
+                storageRemoveSafe([AUTH_SESSION_KEY]);
             }
         }
     }
@@ -524,12 +536,59 @@
             normalized.includes('sign in');
     }
 
+    function storageGetSafe(keys, onDone = () => {}) {
+        try {
+            chrome.storage.local.get(keys, (result) => {
+                const runtimeError = chrome.runtime?.lastError;
+                if (runtimeError) {
+                    console.warn('[Storage] get failed:', runtimeError.message || runtimeError);
+                    onDone({});
+                    return;
+                }
+                onDone(result && typeof result === 'object' ? result : {});
+            });
+        } catch (error) {
+            console.warn('[Storage] get failed:', error);
+            onDone({});
+        }
+    }
+
+    function storageSetSafe(data, onDone = () => {}) {
+        try {
+            chrome.storage.local.set(data, () => {
+                const runtimeError = chrome.runtime?.lastError;
+                if (runtimeError) {
+                    console.warn('[Storage] set failed:', runtimeError.message || runtimeError);
+                }
+                onDone();
+            });
+        } catch (error) {
+            console.warn('[Storage] set failed:', error);
+            onDone();
+        }
+    }
+
+    function storageRemoveSafe(keys, onDone = () => {}) {
+        try {
+            chrome.storage.local.remove(keys, () => {
+                const runtimeError = chrome.runtime?.lastError;
+                if (runtimeError) {
+                    console.warn('[Storage] remove failed:', runtimeError.message || runtimeError);
+                }
+                onDone();
+            });
+        } catch (error) {
+            console.warn('[Storage] remove failed:', error);
+            onDone();
+        }
+    }
+
     function storageGet(keys) {
-        return new Promise((resolve) => chrome.storage.local.get(keys, resolve));
+        return new Promise((resolve) => storageGetSafe(keys, resolve));
     }
 
     function storageSet(data) {
-        return new Promise((resolve) => chrome.storage.local.set(data, resolve));
+        return new Promise((resolve) => storageSetSafe(data, resolve));
     }
 
     function getSessionDomainForUrl(urlValue = sessionUrl) {
@@ -553,7 +612,7 @@
             sessionDomain: getSessionDomainForUrl(sessionUrl)
         };
 
-        chrome.storage.local.set({
+        storageSetSafe({
             [CONVERSATION_HISTORY_KEY]: conversationHistory,
             [SESSION_STATE_KEY]: sessionState,
             [LEGACY_SESSION_DOMAIN_KEY]: sessionState.sessionDomain
@@ -562,7 +621,7 @@
 
     function clearPersistedConversationState() {
         sessionUpdatedAt = null;
-        chrome.storage.local.remove([CONVERSATION_HISTORY_KEY, SESSION_STATE_KEY, LEGACY_SESSION_DOMAIN_KEY]);
+        storageRemoveSafe([CONVERSATION_HISTORY_KEY, SESSION_STATE_KEY, LEGACY_SESSION_DOMAIN_KEY]);
     }
 
     function renderConversationHistory(historyEntries, { fallbackTimestamp = null, withTypewriter = false } = {}) {
@@ -2190,7 +2249,7 @@
     }
 
     function persistUiState() {
-        chrome.storage.local.set({ [UI_STATE_KEY]: uiState });
+        storageSetSafe({ [UI_STATE_KEY]: uiState });
     }
 
     function isLikelyLegacyTopRightPosition(state) {
@@ -2204,7 +2263,7 @@
     }
 
     function migrateAndLoadUiState(onReady) {
-        chrome.storage.local.get([UI_STATE_KEY, ...LEGACY_UI_STATE_KEYS], (result) => {
+        storageGetSafe([UI_STATE_KEY, ...LEGACY_UI_STATE_KEYS], (result) => {
             const loaded = { ...DEFAULT_UI_STATE, ...(result[UI_STATE_KEY] || {}) };
             let migratedLegacy = false;
 
@@ -2268,9 +2327,9 @@
                 if (typeof onReady === 'function') onReady();
             };
 
-            chrome.storage.local.set({ [UI_STATE_KEY]: uiState }, () => {
+            storageSetSafe({ [UI_STATE_KEY]: uiState }, () => {
                 if (migratedLegacy) {
-                    chrome.storage.local.remove(LEGACY_UI_STATE_KEYS, finalize);
+                    storageRemoveSafe(LEGACY_UI_STATE_KEYS, finalize);
                 } else {
                     finalize();
                 }
@@ -2832,7 +2891,10 @@
     function setAuthStatus(message = '', isError = false) {
         const statusEl = shadowRoot?.getElementById('sc-auth-status');
         if (!statusEl) return;
-        statusEl.textContent = message;
+        const statusMessage = isExtensionContextInvalidatedError(message)
+            ? EXTENSION_CONTEXT_RECOVERY_MESSAGE
+            : message;
+        statusEl.textContent = statusMessage;
         statusEl.classList.toggle('error', !!isError);
     }
 
@@ -3068,7 +3130,7 @@
 
     function setProfileNudgeOptOut(enabled) {
         profileNudgeOptOut = !!enabled;
-        chrome.storage.local.set({ [PROFILE_NUDGE_OPT_OUT_KEY]: profileNudgeOptOut });
+        storageSetSafe({ [PROFILE_NUDGE_OPT_OUT_KEY]: profileNudgeOptOut });
         refreshProfileNudgeVisibility();
     }
 
@@ -3194,7 +3256,7 @@
         }
 
         if (persist) {
-            chrome.storage.local.set({ [ATTACH_SCREEN_KEY]: attachScreenEnabled });
+            storageSetSafe({ [ATTACH_SCREEN_KEY]: attachScreenEnabled });
         }
     }
 
@@ -3350,7 +3412,7 @@
             }
         });
 
-        chrome.storage.local.get([AUTH_SESSION_KEY, 'screenchat_user', 'messageCount', ATTACH_SCREEN_KEY, PROFILE_NUDGE_OPT_OUT_KEY, PROFILE_CACHE_KEY], (result) => {
+        storageGetSafe([AUTH_SESSION_KEY, 'screenchat_user', 'messageCount', ATTACH_SCREEN_KEY, PROFILE_NUDGE_OPT_OUT_KEY, PROFILE_CACHE_KEY], (result) => {
             profileNudgeOptOut = !!result[PROFILE_NUDGE_OPT_OUT_KEY];
             if (typeof result[ATTACH_SCREEN_KEY] === 'boolean') {
                 setAttachScreenEnabled(result[ATTACH_SCREEN_KEY], false);
@@ -3393,7 +3455,7 @@
             isAuthRestoreInFlight = false;
 
             if (result.screenchat_user || result.messageCount) {
-                chrome.storage.local.remove(['screenchat_user', 'messageCount']);
+                storageRemoveSafe(['screenchat_user', 'messageCount']);
             }
 
             const messagesArea = shadowRoot.getElementById('sc-messages');
@@ -4249,7 +4311,10 @@
                 setActivePane('chat');
                 setUiMode('open');
             } catch (error) {
-                setAuthStatus(error?.message || 'Google sign-in failed', true);
+                const authErrorMessage = isExtensionContextInvalidatedError(error)
+                    ? EXTENSION_CONTEXT_RECOVERY_MESSAGE
+                    : (getErrorMessage(error) || 'Google sign-in failed');
+                setAuthStatus(authErrorMessage, true);
             } finally {
                 setGoogleSignInState(false);
             }
