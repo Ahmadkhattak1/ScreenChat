@@ -2,7 +2,7 @@
     "manifest_version": 3,
     "name": "ScreenChat - AI Chat for Your Browser",
     "short_name": "ScreenChat",
-    "version": "1.0.4",
+    "version": "1.0.5",
     "description": "Chat with your screen. AI chat that sees your page and helps answer questions.",
     "permissions": [
         "activeTab",

@@ -651,6 +651,35 @@
     margin: 0;
 }
 
+.sc-bubble h1,
+.sc-bubble h2,
+.sc-bubble h3,
+.sc-bubble h4,
+.sc-bubble h5,
+.sc-bubble h6 {
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.sc-bubble h1 {
+    font-size: 1.12em;
+    font-weight: 700;
+}
+
+.sc-bubble h2 {
+    font-size: 1.08em;
+    font-weight: 700;
+}
+
+.sc-bubble h3,
+.sc-bubble h4,
+.sc-bubble h5,
+.sc-bubble h6 {
+    font-size: 1em;
+    font-weight: 600;
+}
+
 .sc-inline-link {
     color: inherit;
 }

@@ -32,7 +32,7 @@
     let authSession = null;
     let isAuthSessionVerified = false;
     let isAuthRestoreInFlight = false;
-    let attachScreenEnabled = false;
+    let attachScreenEnabled = true;
     let attachGlowResetTimeout = 0;
     const API_BASE_CACHE_KEY = 'screenchat_api_base_url';
     const API_BASE_OVERRIDE_KEY = 'screenchat_api_base_override';
@@ -2073,7 +2073,6 @@
     // UI State
     const UI_STATE_KEY = 'sc_ui_v2';
     const LEGACY_UI_STATE_KEYS = ['sc_ui_width', 'sc_ui_height', 'sc_ui_position'];
-    const ATTACH_SCREEN_KEY = 'sc_attach_screen_enabled';
     const PROFILE_NUDGE_OPT_OUT_KEY = 'sc_profile_nudge_opt_out';
     const ATTACH_GLOW_OVERLAY_ID = 'sc-attach-glow-overlay';
     const ATTACH_GLOW_ANIMATION_MS = 920;
@@ -2854,6 +2853,7 @@
         uiState.side = 'right';
         uiState.customPosition = false;
         uiState.panelPosition = getDefaultPanelPosition(uiState.width, uiState.height, 'right');
+        setAttachScreenEnabled(true);
         resetConversationState();
         renderWelcomeMessage(false);
         setActivePane('chat', false);
@@ -3234,7 +3234,7 @@
         attachGlowResetTimeout = window.setTimeout(settle, ATTACH_GLOW_ANIMATION_MS + 200);
     }
 
-    function setAttachScreenEnabled(enabled, persist = true) {
+    function setAttachScreenEnabled(enabled) {
         const wasEnabled = attachScreenEnabled;
         attachScreenEnabled = !!enabled;
         const attachToggle = shadowRoot?.getElementById('sc-attach-screen-toggle');
@@ -3251,12 +3251,8 @@
             toggleIcon.src = getAttachScreenIconUrl(attachScreenEnabled);
         }
 
-        if (attachScreenEnabled && !wasEnabled && persist) {
+        if (attachScreenEnabled && !wasEnabled) {
             playAttachGlowAnimation();
-        }
-
-        if (persist) {
-            storageSetSafe({ [ATTACH_SCREEN_KEY]: attachScreenEnabled });
         }
     }
 
@@ -3412,13 +3408,9 @@
             }
         });
 
-        storageGetSafe([AUTH_SESSION_KEY, 'screenchat_user', 'messageCount', ATTACH_SCREEN_KEY, PROFILE_NUDGE_OPT_OUT_KEY, PROFILE_CACHE_KEY], (result) => {
+        storageGetSafe([AUTH_SESSION_KEY, 'screenchat_user', 'messageCount', PROFILE_NUDGE_OPT_OUT_KEY, PROFILE_CACHE_KEY], (result) => {
             profileNudgeOptOut = !!result[PROFILE_NUDGE_OPT_OUT_KEY];
-            if (typeof result[ATTACH_SCREEN_KEY] === 'boolean') {
-                setAttachScreenEnabled(result[ATTACH_SCREEN_KEY], false);
-            } else {
-                setAttachScreenEnabled(attachScreenEnabled, true);
-            }
+            setAttachScreenEnabled(true);
 
             const cachedProfileIdentity = normalizeProfileIdentity(result[PROFILE_CACHE_KEY]) || readProfileIdentityFromLocalStorage();
             if (cachedProfileIdentity) {
@@ -4327,10 +4319,10 @@
         }
 
         if (attachScreenToggle) {
-            setAttachScreenEnabled(attachScreenEnabled, false);
+            setAttachScreenEnabled(attachScreenEnabled);
             bindPressScale(attachScreenToggle);
             attachScreenToggle.addEventListener('click', () => {
-                setAttachScreenEnabled(!attachScreenEnabled, true);
+                setAttachScreenEnabled(!attachScreenEnabled);
             });
         }
 
@@ -5104,7 +5096,7 @@
                     } catch (captureError) {
                         console.warn('[ScreenCapture] Capture failed:', captureError);
                         if (isCapturePermissionError(captureError)) {
-                            setAttachScreenEnabled(false, true);
+                            setAttachScreenEnabled(false);
                         }
                     }
                 }
@@ -5435,8 +5427,14 @@
         return blocks.join('');
     }
 
-    function formatMessageContent(text) {
-        return renderMarkdown(text);
+    function renderPlainText(text) {
+        const source = typeof text === 'string' ? text : String(text ?? '');
+        const normalized = escapeHtml(source).replace(/\r\n?/g, '\n');
+        return autoLinkTextOutsideTags(normalized).replace(/\n/g, '<br>');
+    }
+
+    function formatMessageContent(text, { enableMarkdown = true } = {}) {
+        return enableMarkdown ? renderMarkdown(text) : renderPlainText(text);
     }
 
     function updateMessageContent(messageEl, text, imageUrl = null, { forceScroll = false, allowPartial = false } = {}) {
@@ -5452,10 +5450,11 @@
         const attachmentHtml = imageUrl
             ? `<div class="sc-attachment"><img src="${imageUrl}" alt="Screenshot"></div>`
             : '';
-        const normalizedText = messageEl.classList.contains('ai')
+        const isAiMessage = messageEl.classList.contains('ai');
+        const normalizedText = isAiMessage
             ? cleanAiReply(text, { allowPartial })
             : (typeof text === 'string' ? text : String(text ?? ''));
-        const formattedText = formatMessageContent(normalizedText);
+        const formattedText = formatMessageContent(normalizedText, { enableMarkdown: isAiMessage });
         bubble.innerHTML = `${formattedText}${attachmentHtml}`;
 
         if (shouldAutoScroll) {

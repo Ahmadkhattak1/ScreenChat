@@ -12,8 +12,8 @@ const syncScriptPath = path.join(projectRoot, 'scripts', 'sync-runtime-config.mj
 const manifestPath = path.join(projectRoot, 'manifest.json');
 const runtimeConfigPath = path.join(projectRoot, 'runtime-config.json');
 const outputGuidePath = path.join(distRoot, 'WEBSTORE_SUBMISSION.md');
-const policyUrl = 'https://github.com/Ahmadkhattak1/ScreenChat/blob/main/PRIVACY_POLICY.md';
-const dataDeletionUrl = 'https://github.com/Ahmadkhattak1/ScreenChat/blob/main/DATA_DELETION.md';
+const policyUrl = 'https://screenchat.ahmadyaseen.com/privacy';
+const dataDeletionUrl = 'https://screenchat.ahmadyaseen.com/data-deletion';
 
 const packageFiles = [
     'manifest.json',
