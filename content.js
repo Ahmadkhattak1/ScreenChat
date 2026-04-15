@@ -4,6 +4,16 @@
     window.screenChatInjected = true;
 
     // ScreenChat Content Script
+    const APP_SURFACE = (() => {
+        const explicitSurface = typeof window.__SCREENCHAT_SURFACE === 'string'
+            ? window.__SCREENCHAT_SURFACE.trim().toLowerCase()
+            : '';
+        if (explicitSurface === 'sidepanel') return 'sidepanel';
+        return /\/sidepanel\.html(?:$|\?)/i.test(window.location?.pathname || '')
+            ? 'sidepanel'
+            : 'content';
+    })();
+    const IS_SIDEPANEL_SURFACE = APP_SURFACE === 'sidepanel';
 
     // State
     let shadowRoot = null;
@@ -11,7 +21,18 @@
     let conversationHistory = [];
     let currentAbortController = null;
     let isAwaitingResponse = false;
+    let activeResponseRequestId = 0;
+    let activeResponseStopRequested = false;
+    let responseRequestCounter = 0;
     let hasLocalConversationMutation = false;
+    let currentSurfaceWindowId = null;
+    let keepAcrossTabsRequestInFlight = false;
+    let keepAcrossTabsState = {
+        active: false,
+        windowId: null,
+        workflow: null,
+        canCloseSidePanel: false
+    };
     // User Profile (personal info for personalization)
     let userProfile = null;
     const DEFAULT_WELCOME_MESSAGE = 'How can I help with this page? What would you like to ask about it?';
@@ -25,6 +46,8 @@
     const AUTH_SESSION_KEY = 'screenchat_auth_session';
     const CONVERSATION_HISTORY_KEY = 'conversationHistory';
     const SESSION_STATE_KEY = 'screenchat_session_state';
+    const KEEP_ACROSS_TABS_STATE_KEY = 'screenchat_keep_across_tabs_v1';
+    const DEFAULT_OPEN_STYLE_KEY = 'screenchat_default_open_style_v1';
     const LEGACY_SESSION_DOMAIN_KEY = 'sessionDomain';
     const PROFILE_CACHE_KEY = 'screenchat_profile_identity';
     const PROFILE_LOCAL_STORAGE_KEY = 'screenchat_profile_identity';
@@ -33,6 +56,7 @@
     let isAuthSessionVerified = false;
     let isAuthRestoreInFlight = false;
     let attachScreenEnabled = true;
+    let preferredOpenStyle = 'window';
     let attachGlowResetTimeout = 0;
     const API_BASE_CACHE_KEY = 'screenchat_api_base_url';
     const API_BASE_OVERRIDE_KEY = 'screenchat_api_base_override';
@@ -92,6 +116,124 @@
 
     function createSessionId() {
         return `session_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
+    }
+
+    const LUCIDE_ICON_PATHS = {
+        'history': [
+            '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />',
+            '<path d="M3 3v5h5" />',
+            '<path d="M12 7v5l4 2" />'
+        ],
+        'circle-fading-plus': [
+            '<path d="M12 2a10 10 0 0 1 7.38 16.75" />',
+            '<path d="M12 8v8" />',
+            '<path d="M16 12H8" />',
+            '<path d="M2.5 8.875a10 10 0 0 0-.5 3" />',
+            '<path d="M2.83 16a10 10 0 0 0 2.43 3.4" />',
+            '<path d="M4.636 5.235a10 10 0 0 1 .891-.857" />',
+            '<path d="M8.644 21.42a10 10 0 0 0 7.631-.38" />'
+        ],
+        'user': [
+            '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" />',
+            '<circle cx="12" cy="7" r="4" />'
+        ],
+        'circle-x': [
+            '<circle cx="12" cy="12" r="10" />',
+            '<path d="m15 9-6 6" />',
+            '<path d="m9 9 6 6" />'
+        ],
+        'pin': [
+            '<path d="M12 17v5" />',
+            '<path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />'
+        ],
+        'plus': [
+            '<path d="M5 12h14" />',
+            '<path d="M12 5v14" />'
+        ],
+        'minus': [
+            '<path d="M5 12h14" />'
+        ],
+        'square': [
+            '<rect width="14" height="14" x="5" y="5" rx="2" ry="2" />'
+        ],
+        'log-out': [
+            '<path d="m16 17 5-5-5-5" />',
+            '<path d="M21 12H9" />',
+            '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />'
+        ],
+        'send': [
+            '<path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z" />',
+            '<path d="m21.854 2.147-10.94 10.939" />'
+        ],
+        'arrow-left': [
+            '<path d="m12 19-7-7 7-7" />',
+            '<path d="M19 12H5" />'
+        ],
+        'search': [
+            '<path d="m21 21-4.34-4.34" />',
+            '<circle cx="11" cy="11" r="8" />'
+        ],
+        'trash': [
+            '<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />',
+            '<path d="M3 6h18" />',
+            '<path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />'
+        ],
+        'chevron-right': [
+            '<path d="m9 18 6-6-6-6" />'
+        ],
+        'loader': [
+            '<path d="M12 2v4" />',
+            '<path d="m16.2 7.8 2.9-2.9" />',
+            '<path d="M18 12h4" />',
+            '<path d="m16.2 16.2 2.9 2.9" />',
+            '<path d="M12 18v4" />',
+            '<path d="m4.9 19.1 2.9-2.9" />',
+            '<path d="M2 12h4" />',
+            '<path d="m4.9 4.9 2.9 2.9" />'
+        ],
+        'circle-slash': [
+            '<circle cx="12" cy="12" r="10" />',
+            '<line x1="9" x2="15" y1="15" y2="9" />'
+        ]
+    };
+    const LUCIDE_FILE_OVERRIDES = {
+        'arrow-left.svg': { icon: 'arrow-left', stroke: '#223B36' },
+        'clock.svg': { icon: 'history', stroke: '#223B36' },
+        'comment-dots.svg': { icon: 'circle-fading-plus', stroke: '#223B36' },
+        'user.svg': { icon: 'user', stroke: '#223B36' },
+        'times-square.svg': { icon: 'circle-x', stroke: '#223B36' },
+        'pin.svg': { icon: 'pin', stroke: '#223B36' },
+        'plus-square-Filled.svg': { icon: 'plus', stroke: '#43A996' },
+        'minus-square-muted.svg': { icon: 'minus', stroke: '#74818C' },
+        'minus-square-Filled.svg': { icon: 'minus', stroke: '#74818C' },
+        'Log out.svg': { icon: 'log-out', stroke: '#3E544F' },
+        'send.svg': { icon: 'send', stroke: '#FFFFFF' },
+        'Icon Button.svg': { icon: 'trash', stroke: '#223B36' },
+        'trash.svg': { icon: 'trash', stroke: '#223B36' },
+        'chevron-right.svg': { icon: 'chevron-right', stroke: '#223B36' },
+        'search.svg': { icon: 'search', stroke: '#223B36' },
+        'loader.svg': { icon: 'loader', stroke: '#758481' },
+        'circle-slash.svg': { icon: 'circle-slash', stroke: '#758481' }
+    };
+    const lucideDataUriCache = new Map();
+
+    function buildLucideIconDataUri(iconName, strokeColor) {
+        const paths = LUCIDE_ICON_PATHS[iconName];
+        if (!Array.isArray(paths) || !paths.length) return '';
+        const svg = [
+            '<svg xmlns="http://www.w3.org/2000/svg"',
+            ' width="24"',
+            ' height="24"',
+            ' viewBox="0 0 24 24"',
+            ' fill="none"',
+            ` stroke="${strokeColor}"`,
+            ' stroke-width="1.5"',
+            ' stroke-linecap="round"',
+            ' stroke-linejoin="round">',
+            ...paths,
+            '</svg>'
+        ].join('');
+        return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
     }
 
     function normalizeConversationRole(rawRole) {
@@ -591,6 +733,277 @@
         return new Promise((resolve) => storageSetSafe(data, resolve));
     }
 
+    function normalizePreferredOpenStyle(rawValue) {
+        const normalizedValue = typeof rawValue === 'string' ? rawValue.trim().toLowerCase() : '';
+        return normalizedValue === 'sidebar' ? 'sidebar' : 'window';
+    }
+
+    function isSidebarPreferredOpenStyle() {
+        return normalizePreferredOpenStyle(preferredOpenStyle) === 'sidebar';
+    }
+
+    function syncPreferredOpenStyleUi() {
+        if (!shadowRoot) return;
+        const optionInputs = shadowRoot.querySelectorAll('input[name="sc-default-open-style"]');
+        optionInputs.forEach((input) => {
+            const isChecked = normalizePreferredOpenStyle(input.value) === preferredOpenStyle;
+            input.checked = isChecked;
+            const optionCard = input.closest('.sc-open-style-option');
+            if (optionCard) {
+                optionCard.classList.toggle('selected', isChecked);
+            }
+        });
+    }
+
+    function setPreferredOpenStyle(nextStyle, { persist = true } = {}) {
+        preferredOpenStyle = normalizePreferredOpenStyle(nextStyle);
+        syncPreferredOpenStyleUi();
+        if (persist) {
+            storageSetSafe({ [DEFAULT_OPEN_STYLE_KEY]: preferredOpenStyle });
+        }
+        return preferredOpenStyle;
+    }
+
+    async function loadPreferredOpenStyle() {
+        const storedValues = await storageGet([DEFAULT_OPEN_STYLE_KEY]);
+        return setPreferredOpenStyle(storedValues?.[DEFAULT_OPEN_STYLE_KEY], { persist: false });
+    }
+
+    function normalizeKeepAcrossTabsState(rawState) {
+        const workflowSource = rawState?.workflow && typeof rawState.workflow === 'object' && !Array.isArray(rawState.workflow)
+            ? rawState.workflow
+            : null;
+        const sessionId = isNonEmptyString(workflowSource?.sessionId) ? workflowSource.sessionId.trim() : '';
+        const workflow = sessionId
+            ? {
+                sessionId,
+                sessionUrl: isNonEmptyString(workflowSource?.sessionUrl) ? workflowSource.sessionUrl.trim() : '',
+                updatedAt: toIsoTimestamp(workflowSource?.updatedAt) || '',
+                enabledAt: toIsoTimestamp(workflowSource?.enabledAt) || ''
+            }
+            : null;
+
+        return {
+            active: !!rawState?.active && !!workflow,
+            windowId: Number.isInteger(rawState?.windowId) ? rawState.windowId : null,
+            workflow,
+            canCloseSidePanel: !!rawState?.canCloseSidePanel
+        };
+    }
+
+    function getPersistedConversationSnapshot(storageResult = {}) {
+        const persistedHistory = normalizeConversationHistory(storageResult?.[CONVERSATION_HISTORY_KEY]);
+        const rawSessionState = storageResult?.[SESSION_STATE_KEY];
+        const sessionState = rawSessionState && typeof rawSessionState === 'object' && !Array.isArray(rawSessionState)
+            ? rawSessionState
+            : null;
+        const persistedSessionId = isNonEmptyString(sessionState?.sessionId)
+            ? sessionState.sessionId.trim()
+            : '';
+        if (!persistedSessionId && !persistedHistory.length) {
+            return null;
+        }
+
+        return {
+            sessionId: persistedSessionId || createSessionId(),
+            sessionUrl: isNonEmptyString(sessionState?.sessionUrl)
+                ? sessionState.sessionUrl.trim()
+                : (isNonEmptyString(sessionState?.sessionDomain) ? sessionState.sessionDomain.trim() : ''),
+            updatedAt: toIsoTimestamp(sessionState?.updatedAt) || getLatestConversationTimestamp(persistedHistory),
+            history: persistedHistory
+        };
+    }
+
+    async function restoreKeepAcrossTabsConversation({ force = false } = {}) {
+        if (!IS_SIDEPANEL_SURFACE || !keepAcrossTabsState.active) return false;
+
+        const persistedConversation = getPersistedConversationSnapshot(
+            await storageGet([CONVERSATION_HISTORY_KEY, SESSION_STATE_KEY])
+        );
+        if (!persistedConversation) return false;
+
+        const workflowSessionId = isNonEmptyString(keepAcrossTabsState.workflow?.sessionId)
+            ? keepAcrossTabsState.workflow.sessionId.trim()
+            : '';
+        if (workflowSessionId && persistedConversation.sessionId !== workflowSessionId) {
+            return false;
+        }
+
+        const persistedUpdatedAt = persistedConversation.updatedAt || '';
+        const currentUpdatedAt = sessionUpdatedAt || getLatestConversationTimestamp(conversationHistory);
+        const shouldApply = force
+            || persistedConversation.sessionId !== sessionId
+            || persistedConversation.history.length !== conversationHistory.length
+            || persistedUpdatedAt !== currentUpdatedAt;
+        if (!shouldApply) return false;
+
+        applyConversationState({
+            sessionId: persistedConversation.sessionId,
+            sessionUrl: persistedConversation.sessionUrl || sessionUrl,
+            history: persistedConversation.history,
+            updatedAt: persistedConversation.updatedAt,
+            persist: false,
+            withTypewriter: false
+        });
+        return true;
+    }
+
+    async function getSurfaceWindowId() {
+        if (!IS_SIDEPANEL_SURFACE) return null;
+        if (Number.isInteger(currentSurfaceWindowId)) return currentSurfaceWindowId;
+        if (typeof chrome?.windows?.getCurrent !== 'function') return null;
+
+        try {
+            const currentWindow = await chrome.windows.getCurrent();
+            currentSurfaceWindowId = Number.isInteger(currentWindow?.id) ? currentWindow.id : null;
+        } catch (error) {
+            console.warn('[KeepAcrossTabs] Failed to resolve current window:', error);
+            currentSurfaceWindowId = null;
+        }
+
+        return currentSurfaceWindowId;
+    }
+
+    function sendSurfaceRuntimeMessage(payload) {
+        const nextPayload = payload && typeof payload === 'object' ? { ...payload } : {};
+        if (!IS_SIDEPANEL_SURFACE) {
+            if (nextPayload.action === 'open_side_panel') {
+                console.info('[OpenStyle] Sending sidebar open request from content surface', {
+                    surface: APP_SURFACE,
+                    preferredOpenStyle,
+                    windowId: null
+                });
+            }
+            return chrome.runtime.sendMessage(nextPayload);
+        }
+        return getSurfaceWindowId().then((surfaceWindowId) => {
+            if (Number.isInteger(surfaceWindowId)) {
+                nextPayload.windowId = surfaceWindowId;
+            }
+            if (nextPayload.action === 'open_side_panel') {
+                console.info('[OpenStyle] Sending sidebar open request from sidepanel surface', {
+                    surface: APP_SURFACE,
+                    preferredOpenStyle,
+                    windowId: Number.isInteger(surfaceWindowId) ? surfaceWindowId : null
+                });
+            }
+            return chrome.runtime.sendMessage(nextPayload);
+        });
+    }
+
+    async function fetchKeepAcrossTabsState() {
+        const response = await sendSurfaceRuntimeMessage({ action: 'get_keep_across_tabs_state' });
+        if (!response?.ok) {
+            throw new Error(response?.error || 'Unable to load keep across tabs state');
+        }
+        return normalizeKeepAcrossTabsState(response);
+    }
+
+    async function openKeepAcrossTabsPanel() {
+        const response = await sendSurfaceRuntimeMessage({ action: 'open_keep_across_tabs_panel' });
+        if (!response?.ok || !response?.active) {
+            throw new Error(response?.error || 'Unable to open keep across tabs');
+        }
+        return response;
+    }
+
+    async function openDefaultSidePanel() {
+        console.info('[OpenStyle] Requesting default sidebar open', {
+            surface: APP_SURFACE,
+            preferredOpenStyle
+        });
+        const response = await sendSurfaceRuntimeMessage({ action: 'open_side_panel' });
+        console.info('[OpenStyle] Sidebar open response received', {
+            surface: APP_SURFACE,
+            preferredOpenStyle,
+            ok: !!response?.ok,
+            windowId: Number.isInteger(response?.windowId) ? response.windowId : null,
+            error: response?.error || null
+        });
+        if (!response?.ok) {
+            throw new Error(response?.error || 'Unable to open sidebar');
+        }
+        return response;
+    }
+
+    function syncKeepAcrossTabsUi() {
+        const keepAcrossTabsBtn = shadowRoot?.getElementById('sc-keep-across-tabs');
+        const isActive = !!keepAcrossTabsState.active;
+        if (keepAcrossTabsBtn) {
+            keepAcrossTabsBtn.classList.toggle('active', isActive);
+            keepAcrossTabsBtn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+            keepAcrossTabsBtn.setAttribute('title', 'Keep across tabs');
+            keepAcrossTabsBtn.setAttribute('aria-label', 'Keep across tabs');
+            keepAcrossTabsBtn.disabled = !!keepAcrossTabsRequestInFlight;
+        }
+
+        const panel = shadowRoot?.getElementById('sc-panel');
+        if (panel) {
+            panel.toggleAttribute('data-keep-across-tabs-active', isActive);
+        }
+    }
+
+    async function refreshKeepAcrossTabsState({ hideInlineUiOnActive = true } = {}) {
+        const wasKeepAcrossTabsActive = !!keepAcrossTabsState.active;
+        try {
+            keepAcrossTabsState = await fetchKeepAcrossTabsState();
+        } catch (error) {
+            console.warn('[KeepAcrossTabs] State refresh failed:', error);
+            keepAcrossTabsState = normalizeKeepAcrossTabsState(null);
+        }
+
+        syncKeepAcrossTabsUi();
+
+        if (!IS_SIDEPANEL_SURFACE && keepAcrossTabsState.active && hideInlineUiOnActive) {
+            setUiMode('hidden');
+        } else if (!IS_SIDEPANEL_SURFACE && wasKeepAcrossTabsActive && !keepAcrossTabsState.active && uiState.mode === 'hidden') {
+            setActivePane('chat', false);
+            setUiMode('open');
+        }
+
+        return keepAcrossTabsState;
+    }
+
+    async function setKeepAcrossTabsEnabled(enabled) {
+        const response = await sendSurfaceRuntimeMessage({
+            action: 'set_keep_across_tabs_state',
+            enabled: !!enabled,
+            sessionId,
+            sessionUrl,
+            updatedAt: sessionUpdatedAt || getLatestConversationTimestamp(conversationHistory)
+        });
+        if (!response?.ok) {
+            throw new Error(response?.error || 'Unable to update keep across tabs');
+        }
+        keepAcrossTabsState = normalizeKeepAcrossTabsState(response);
+        syncKeepAcrossTabsUi();
+        return keepAcrossTabsState;
+    }
+
+    async function toggleKeepAcrossTabs() {
+        if (keepAcrossTabsRequestInFlight) return;
+        keepAcrossTabsRequestInFlight = true;
+        syncKeepAcrossTabsUi();
+
+        try {
+            const nextEnabled = !keepAcrossTabsState.active;
+            if (nextEnabled) {
+                persistConversationState({ updatedAt: sessionUpdatedAt || getLatestConversationTimestamp(conversationHistory) });
+            }
+
+            const nextState = await setKeepAcrossTabsEnabled(nextEnabled);
+            if (!IS_SIDEPANEL_SURFACE && nextState.active) {
+                setUiMode('hidden');
+            }
+        } catch (error) {
+            console.warn('[KeepAcrossTabs] Toggle failed:', error);
+            await refreshKeepAcrossTabsState({ hideInlineUiOnActive: false });
+        } finally {
+            keepAcrossTabsRequestInFlight = false;
+            syncKeepAcrossTabsUi();
+        }
+    }
+
     function getSessionDomainForUrl(urlValue = sessionUrl) {
         if (!isNonEmptyString(urlValue)) {
             return window.location.hostname;
@@ -666,11 +1079,20 @@
         syncQuickPromptsVisibility();
     }
 
-    function buildClientContext() {
+    function buildClientContext(pageUrl = sessionUrl) {
         const userAgent = typeof navigator !== 'undefined' ? navigator.userAgent || '' : '';
         const platform = typeof navigator !== 'undefined' ? navigator.platform || '' : '';
         const normalizedUserAgent = userAgent.toLowerCase();
         const normalizedPlatform = platform.toLowerCase();
+        const resolvedPageUrl = isNonEmptyString(pageUrl) ? pageUrl.trim() : '';
+        let pageHostname = '';
+        if (resolvedPageUrl) {
+            try {
+                pageHostname = new URL(resolvedPageUrl).hostname || '';
+            } catch {
+                pageHostname = '';
+            }
+        }
 
         let browser = '';
         if (normalizedUserAgent.includes('edg/')) browser = 'Edge';
@@ -697,7 +1119,7 @@
             browser,
             os,
             deviceType,
-            pageHostname: window.location.hostname || '',
+            pageHostname,
             extensionVersion: chrome.runtime.getManifest()?.version || ''
         };
     }
@@ -1852,7 +2274,7 @@
 
     async function getActiveTabUrl() {
         try {
-            const response = await chrome.runtime.sendMessage({ action: 'get_active_tab_url' });
+            const response = await sendSurfaceRuntimeMessage({ action: 'get_active_tab_url' });
             if (response?.ok && typeof response.url === 'string' && response.url.trim()) {
                 return response.url.trim();
             }
@@ -2105,7 +2527,6 @@
     const HOTKEY_DEBUG_ENABLED = false;
     const HOTKEY_REPEAT_GUARD_MS = 220;
     const HOTKEY_CROSS_SOURCE_GUARD_MS = 700;
-    const HOTKEY_PAGE_FALLBACK_DELAY_MS = 340;
     const CHAT_AUTO_SCROLL_THRESHOLD_PX = 48;
     const ROUTED_WHEEL_SCROLL_EASING = 0.24;
     const ROUTED_WHEEL_SCROLL_SETTLE_PX = 0.5;
@@ -2113,7 +2534,6 @@
     const HEADER_REVEAL_DURATION_MS = 640;
     let lastHotkeyToggleAt = 0;
     let lastHotkeyToggleSource = '';
-    let pendingPageHotkeyTimer = null;
     let uiStateHydrated = false;
     let pendingUiAction = null;
     let shadowStylesLoaded = false;
@@ -2248,6 +2668,7 @@
     }
 
     function persistUiState() {
+        if (IS_SIDEPANEL_SURFACE) return;
         storageSetSafe({ [UI_STATE_KEY]: uiState });
     }
 
@@ -2262,6 +2683,20 @@
     }
 
     function migrateAndLoadUiState(onReady) {
+        if (IS_SIDEPANEL_SURFACE) {
+            uiState = {
+                ...DEFAULT_UI_STATE,
+                mode: 'open',
+                movable: false,
+                resizable: false,
+                customPosition: false,
+                panelPosition: null
+            };
+            applyUiState();
+            if (typeof onReady === 'function') onReady();
+            return;
+        }
+
         storageGetSafe([UI_STATE_KEY, ...LEGACY_UI_STATE_KEYS], (result) => {
             const loaded = { ...DEFAULT_UI_STATE, ...(result[UI_STATE_KEY] || {}) };
             let migratedLegacy = false;
@@ -2338,6 +2773,24 @@
 
     function applyPanelGeometry() {
         if (!shadowRoot) return;
+        if (IS_SIDEPANEL_SURFACE) {
+            const host = document.getElementById('screenchat-host');
+            if (host) {
+                host.classList.remove('sc-left');
+            }
+
+            const panel = shadowRoot.getElementById('sc-panel');
+            if (panel) {
+                panel.style.width = '';
+                panel.style.height = '';
+                panel.classList.remove('is-movable');
+                panel.classList.remove('is-resizable');
+            }
+
+            positionProfileNudge();
+            return;
+        }
+
         normalizeUiGeometry();
         syncSideFromGeometry();
 
@@ -2444,7 +2897,9 @@
 
     function setUiMode(mode, persist = true) {
         const previousMode = uiState.mode;
-        const targetMode = ['open', 'hidden'].includes(mode) ? mode : 'open';
+        const targetMode = IS_SIDEPANEL_SURFACE
+            ? 'open'
+            : (['open', 'hidden'].includes(mode) ? mode : 'open');
         const shouldAnimateHeader = targetMode === 'open' && previousMode !== 'open';
         uiState.mode = targetMode;
         if (previousMode !== targetMode) {
@@ -2730,15 +3185,29 @@
         return isMacDevice() ? ['⌘', '⇧', 'Y'] : ['Ctrl', 'Shift', 'Y'];
     }
 
-    function isTextEditingTarget(target) {
-        if (!(target instanceof Element)) return false;
-        if (target.closest('input, textarea, select, [contenteditable="true"], [role="textbox"]')) return true;
-        return false;
+    function isEdgeBrowser() {
+        const brands = Array.isArray(navigator.userAgentData?.brands) ? navigator.userAgentData.brands : [];
+        if (brands.some((brand) => /microsoft edge/i.test(brand?.brand || ''))) {
+            return true;
+        }
+        return /\bEdg\//i.test(navigator.userAgent || '');
     }
 
-    function isScreenChatEvent(event) {
-        const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
-        return path.some((node) => node && node.id === 'screenchat-host');
+    function getShortcutSettingsInfo() {
+        return isEdgeBrowser()
+            ? { browser: 'edge', browserName: 'Edge', url: 'edge://extensions/shortcuts' }
+            : { browser: 'chrome', browserName: 'Chrome', url: 'chrome://extensions/shortcuts' };
+    }
+
+    async function openShortcutSettings() {
+        const shortcutSettings = getShortcutSettingsInfo();
+        const response = await sendSurfaceRuntimeMessage({
+            action: 'open_shortcut_settings',
+            browser: shortcutSettings.browser
+        });
+        if (!response?.ok) {
+            throw new Error(response?.error || 'Unable to open shortcut settings');
+        }
     }
 
     function installHostEventShield(host) {
@@ -2764,17 +3233,6 @@
         });
 
         host.dataset.scShieldInstalled = '1';
-    }
-
-    function isToggleHotkeyEvent(event) {
-        const key = (event.key || '').toLowerCase();
-        const yPressed = key === 'y' || event.code === 'KeyY';
-        if (!yPressed || !event.shiftKey || event.altKey || event.repeat) return false;
-
-        if (isMacDevice()) {
-            return event.metaKey && !event.ctrlKey;
-        }
-        return event.ctrlKey && !event.metaKey;
     }
 
     function triggerHotkeyToggle(source = 'runtime_message') {
@@ -2805,39 +3263,6 @@
         toggleUIFromHotkey();
     }
 
-    function onGlobalHotkeyKeydown(event) {
-        if (!isToggleHotkeyEvent(event)) return;
-        if (event.defaultPrevented) return;
-
-        const editing = isTextEditingTarget(event.target);
-        const fromScreenChat = isScreenChatEvent(event);
-        if (editing && !fromScreenChat) return;
-
-        event.preventDefault();
-        event.stopPropagation();
-        hotkeyLog('page_keydown_detected', {
-            key: event.key,
-            code: event.code,
-            ctrlKey: !!event.ctrlKey,
-            metaKey: !!event.metaKey,
-            shiftKey: !!event.shiftKey,
-            altKey: !!event.altKey
-        });
-
-        if (pendingPageHotkeyTimer) {
-            clearTimeout(pendingPageHotkeyTimer);
-            pendingPageHotkeyTimer = null;
-            hotkeyLog('page_fallback_rescheduled');
-        }
-
-        pendingPageHotkeyTimer = setTimeout(() => {
-            pendingPageHotkeyTimer = null;
-            hotkeyLog('page_fallback_fired');
-            handleUiAction('hotkey_toggle_ui', 'page_keydown_fallback');
-        }, HOTKEY_PAGE_FALLBACK_DELAY_MS);
-        hotkeyLog('page_fallback_scheduled', { delayMs: HOTKEY_PAGE_FALLBACK_DELAY_MS });
-    }
-
     function renderHotkeyHint() {
         const hint = shadowRoot?.getElementById('sc-hotkey-hint');
         if (!hint) return;
@@ -2849,15 +3274,54 @@
     }
 
     function openUiFromActivation() {
-        // Open in the default anchored corner on activation.
-        uiState.side = 'right';
-        uiState.customPosition = false;
-        uiState.panelPosition = getDefaultPanelPosition(uiState.width, uiState.height, 'right');
-        setAttachScreenEnabled(true);
-        resetConversationState();
-        renderWelcomeMessage(false);
+        console.info('[OpenStyle] Activation requested', {
+            surface: APP_SURFACE,
+            preferredOpenStyle,
+            keepAcrossTabsActive: !!keepAcrossTabsState.active,
+            uiMode: uiState.mode
+        });
+        if (!IS_SIDEPANEL_SURFACE && keepAcrossTabsState.active) {
+            openKeepAcrossTabsPanel()
+                .then(() => {
+                    console.info('[OpenStyle] Reopened existing keep-across-tabs sidebar');
+                    setUiMode('hidden');
+                })
+                .catch((error) => {
+                    const errorMessage = String(error?.message || '');
+                    if (errorMessage.includes('No active keep across tabs workflow')) {
+                        refreshKeepAcrossTabsState({ hideInlineUiOnActive: false }).catch(() => {});
+                    } else {
+                        console.warn('[KeepAcrossTabs] Failed to reopen side panel:', error);
+                    }
+                    setActivePane('chat', false);
+                    setUiMode('open');
+                });
+            return;
+        }
+
+        if (!IS_SIDEPANEL_SURFACE && isSidebarPreferredOpenStyle()) {
+            openDefaultSidePanel()
+                .then(() => {
+                    console.info('[OpenStyle] Preferred sidebar opened successfully');
+                    setUiMode('hidden');
+                })
+                .catch((error) => {
+                    console.warn('[OpenStyle] Failed to open preferred sidebar:', error);
+                    console.info('[OpenStyle] Falling back to inline window after sidebar open failure');
+                    openInlineUiFromActivation();
+                });
+            return;
+        }
+
+        console.info('[OpenStyle] Opening inline window');
+        openInlineUiFromActivation();
+    }
+
+    function restoreInlineUiFromSidePanel() {
+        if (IS_SIDEPANEL_SURFACE) return;
         setActivePane('chat', false);
         setUiMode('open');
+        focusChatInput();
     }
 
     function runUiAction(action, source = 'runtime_message') {
@@ -2866,18 +3330,16 @@
             toggleUI();
         } else if (action === 'open_ui') {
             openUiFromActivation();
+        } else if (action === 'hide_ui') {
+            setUiMode('hidden');
+        } else if (action === 'restore_inline_ui') {
+            restoreInlineUiFromSidePanel();
         } else if (action === 'hotkey_toggle_ui') {
             triggerHotkeyToggle(source);
         }
     }
 
     function handleUiAction(action, source = 'runtime_message') {
-        if (action === 'hotkey_toggle_ui' && source === 'runtime_message' && pendingPageHotkeyTimer) {
-            clearTimeout(pendingPageHotkeyTimer);
-            pendingPageHotkeyTimer = null;
-            hotkeyLog('page_fallback_cancelled_by_runtime');
-        }
-
         if (!uiStateHydrated) {
             pendingUiAction = { action, source };
             hotkeyLog('action_queued_until_hydrated', { action, source });
@@ -3087,12 +3549,23 @@
     }
 
     function resetConversationState() {
+        if (currentAbortController) {
+            try {
+                currentAbortController.abort();
+            } catch {
+                // No-op.
+            }
+        }
+        currentAbortController = null;
+        activeResponseRequestId = 0;
+        activeResponseStopRequested = false;
         sessionId = createSessionId();
         sessionUrl = window.location.href || window.location.hostname || 'unknown';
         sessionUpdatedAt = null;
         conversationHistory = [];
         isAwaitingResponse = false;
         hasLocalConversationMutation = false;
+        setAttachScreenEnabled(true);
         clearPersistedConversationState();
     }
 
@@ -3106,7 +3579,27 @@
         }
     }
 
+    function openInlineUiFromActivation() {
+        uiState.side = 'right';
+        uiState.customPosition = false;
+        uiState.panelPosition = getDefaultPanelPosition(uiState.width, uiState.height, 'right');
+        setAttachScreenEnabled(true);
+        resetConversationState();
+        renderWelcomeMessage(false);
+        setActivePane('chat', false);
+        setUiMode('open');
+    }
+
     function getUiSvgUrl(filename) {
+        const normalizedFilename = typeof filename === 'string' ? filename.trim() : '';
+        const override = LUCIDE_FILE_OVERRIDES[normalizedFilename];
+        if (override) {
+            const cacheKey = `${normalizedFilename}:${override.icon}:${override.stroke}`;
+            if (!lucideDataUriCache.has(cacheKey)) {
+                lucideDataUriCache.set(cacheKey, buildLucideIconDataUri(override.icon, override.stroke));
+            }
+            return lucideDataUriCache.get(cacheKey);
+        }
         return chrome.runtime.getURL(`icons/svgs/${filename}`);
     }
 
@@ -3120,6 +3613,26 @@
 
     function getAttachScreenIconUrl(isEnabled) {
         return getUiSvgUrl(isEnabled ? 'minus-square-muted.svg' : 'plus-square-Filled.svg');
+    }
+
+    function getPrimaryActionControlLabel() {
+        return isAwaitingResponse ? 'Stop response' : 'Send message';
+    }
+
+    function getPrimaryActionTooltip() {
+        return isAwaitingResponse ? 'Stop response' : 'Send (Enter)';
+    }
+
+    function getPrimaryActionIconUrl() {
+        return isAwaitingResponse
+            ? buildLucideIconDataUri('square', '#FFFFFF')
+            : getUiSvgUrl('send.svg');
+    }
+
+    function getChatInputPlaceholder(fallback = 'Ask me anything...') {
+        return isAwaitingResponse
+            ? 'Type to interrupt...'
+            : fallback;
     }
 
     function hasAnyProfileValue(profile) {
@@ -3286,49 +3799,64 @@
         });
     }
 
+    async function waitForCaptureSettle({ frames = 2, delayMs = 120 } = {}) {
+        await waitForPaint(frames);
+        const nextDelayMs = Math.max(0, Number(delayMs) || 0);
+        if (nextDelayMs > 0) {
+            await new Promise((resolve) => setTimeout(resolve, nextDelayMs));
+        }
+    }
+
     function captureVisibleTabImage() {
         return new Promise((resolve, reject) => {
-            chrome.runtime.sendMessage({ action: 'capture_visible_tab' }, (response) => {
-                if (chrome.runtime.lastError) {
-                    reject(new Error(chrome.runtime.lastError.message || 'Failed to capture screen'));
-                    return;
-                }
-                if (!response?.ok || typeof response.image !== 'string' || !response.image) {
-                    reject(new Error(response?.error || 'Failed to capture screen'));
-                    return;
-                }
-                resolve(response.image);
-            });
+            getSurfaceWindowId()
+                .then((surfaceWindowId) => {
+                    const payload = { action: 'capture_visible_tab' };
+                    if (Number.isInteger(surfaceWindowId)) {
+                        payload.windowId = surfaceWindowId;
+                    }
+
+                    chrome.runtime.sendMessage(payload, (response) => {
+                        if (chrome.runtime.lastError) {
+                            reject(new Error(chrome.runtime.lastError.message || 'Failed to capture screen'));
+                            return;
+                        }
+                        if (!response?.ok || typeof response.image !== 'string' || !response.image) {
+                            reject(new Error(response?.error || 'Failed to capture screen'));
+                            return;
+                        }
+                        resolve(response.image);
+                    });
+                })
+                .catch((error) => {
+                    reject(error instanceof Error ? error : new Error(String(error || 'Failed to capture screen')));
+                });
         });
     }
 
     async function captureCurrentScreen() {
+        if (IS_SIDEPANEL_SURFACE) {
+            await waitForCaptureSettle({ frames: 3, delayMs: 180 });
+            return captureVisibleTabImage();
+        }
+
         const host = document.getElementById('screenchat-host');
         const shouldMoveHostOffscreen = !!host && hasVisibleScreenChatUiForCapture();
 
         if (!shouldMoveHostOffscreen) {
+            await waitForCaptureSettle({ frames: 2, delayMs: 120 });
             return captureVisibleTabImage();
         }
 
         host.setAttribute('data-sc-capture-hidden', '1');
         try {
             // Wait for the hide state to paint before capture so the screenshot keeps underlying content.
-            await waitForPaint(2);
+            await waitForCaptureSettle({ frames: 2, delayMs: 120 });
             return await captureVisibleTabImage();
         } finally {
             host.removeAttribute('data-sc-capture-hidden');
             await waitForPaint(1);
         }
-    }
-
-    function isCapturePermissionError(error) {
-        const message = String(error?.message || '').toLowerCase();
-        return (
-            message.includes('permission') ||
-            message.includes('denied') ||
-            message.includes('not allowed') ||
-            message.includes('not permitted')
-        );
     }
 
     // Initialize
@@ -3338,6 +3866,7 @@
 
         const host = document.createElement('div');
         host.id = 'screenchat-host';
+        host.setAttribute('data-sc-surface', APP_SURFACE);
         document.body.appendChild(host);
         installHostEventShield(host);
 
@@ -3357,12 +3886,15 @@
         shadowRoot.appendChild(link);
 
         createUI();
+        loadPreferredOpenStyle().catch((error) => {
+            console.warn('[OpenStyle] Failed to load preferred opening style:', error);
+        });
         resolveApiBaseUrl().catch((error) => {
             console.warn('[API] Backend discovery failed:', error);
         });
 
         chrome.runtime.onMessage.addListener((request) => {
-            if (request.action === 'toggle_ui' || request.action === 'open_ui' || request.action === 'hotkey_toggle_ui') {
+            if (request.action === 'toggle_ui' || request.action === 'open_ui' || request.action === 'restore_inline_ui' || request.action === 'hotkey_toggle_ui' || request.action === 'hide_ui') {
                 hotkeyLog('runtime_message_received', {
                     action: request.action,
                     hotkeyRequestId: request.hotkeyRequestId || null,
@@ -3372,7 +3904,22 @@
             }
         });
 
-        window.addEventListener('keydown', onGlobalHotkeyKeydown, true);
+        chrome.storage.onChanged.addListener((changes, areaName) => {
+            if (areaName !== 'local') return;
+            if (changes?.[DEFAULT_OPEN_STYLE_KEY]) {
+                setPreferredOpenStyle(changes[DEFAULT_OPEN_STYLE_KEY].newValue, { persist: false });
+            }
+            if (changes?.[KEEP_ACROSS_TABS_STATE_KEY]) {
+                refreshKeepAcrossTabsState({
+                    hideInlineUiOnActive: !keepAcrossTabsRequestInFlight
+                }).then(() => {
+                    if (!IS_SIDEPANEL_SURFACE || !keepAcrossTabsState.active) return null;
+                    return restoreKeepAcrossTabsConversation();
+                }).catch((error) => {
+                    console.warn('[KeepAcrossTabs] Storage sync failed:', error);
+                });
+            }
+        });
 
         window.addEventListener('resize', () => {
             if (!container) return;
@@ -3408,56 +3955,90 @@
             }
         });
 
-        storageGetSafe([AUTH_SESSION_KEY, 'screenchat_user', 'messageCount', PROFILE_NUDGE_OPT_OUT_KEY, PROFILE_CACHE_KEY], (result) => {
-            profileNudgeOptOut = !!result[PROFILE_NUDGE_OPT_OUT_KEY];
-            setAttachScreenEnabled(true);
+        storageGetSafe([
+            AUTH_SESSION_KEY,
+            'screenchat_user',
+            'messageCount',
+            PROFILE_NUDGE_OPT_OUT_KEY,
+            PROFILE_CACHE_KEY,
+            CONVERSATION_HISTORY_KEY,
+            SESSION_STATE_KEY
+        ], (result) => {
+            (async () => {
+                profileNudgeOptOut = !!result[PROFILE_NUDGE_OPT_OUT_KEY];
+                setAttachScreenEnabled(true);
 
-            const cachedProfileIdentity = normalizeProfileIdentity(result[PROFILE_CACHE_KEY]) || readProfileIdentityFromLocalStorage();
-            if (cachedProfileIdentity) {
-                persistProfileIdentity(cachedProfileIdentity);
-                const initialProfileInputs = {
-                    profileNameInput: shadowRoot?.getElementById('sc-profile-name'),
-                    profileNicknameInput: shadowRoot?.getElementById('sc-profile-nickname'),
-                    profileEmailInput: shadowRoot?.getElementById('sc-profile-email'),
-                    profilePhoneInput: shadowRoot?.getElementById('sc-profile-phone'),
-                    profileNotesInput: shadowRoot?.getElementById('sc-profile-notes')
-                };
-                userProfile = applyProfileFormValues({
-                    profileNameInput: initialProfileInputs.profileNameInput,
-                    profileNicknameInput: initialProfileInputs.profileNicknameInput,
-                    profileEmailInput: initialProfileInputs.profileEmailInput,
-                    profilePhoneInput: initialProfileInputs.profilePhoneInput,
-                    profileNotesInput: initialProfileInputs.profileNotesInput
-                }, {
-                    fullName: cachedProfileIdentity.fullName || '',
-                    nickname: '',
-                    email: cachedProfileIdentity.email || '',
-                    phone: '',
-                    notes: ''
-                });
-            }
+                const cachedProfileIdentity = normalizeProfileIdentity(result[PROFILE_CACHE_KEY]) || readProfileIdentityFromLocalStorage();
+                if (cachedProfileIdentity) {
+                    persistProfileIdentity(cachedProfileIdentity);
+                    const initialProfileInputs = {
+                        profileNameInput: shadowRoot?.getElementById('sc-profile-name'),
+                        profileNicknameInput: shadowRoot?.getElementById('sc-profile-nickname'),
+                        profileEmailInput: shadowRoot?.getElementById('sc-profile-email'),
+                        profilePhoneInput: shadowRoot?.getElementById('sc-profile-phone'),
+                        profileNotesInput: shadowRoot?.getElementById('sc-profile-notes')
+                    };
+                    userProfile = applyProfileFormValues({
+                        profileNameInput: initialProfileInputs.profileNameInput,
+                        profileNicknameInput: initialProfileInputs.profileNicknameInput,
+                        profileEmailInput: initialProfileInputs.profileEmailInput,
+                        profilePhoneInput: initialProfileInputs.profilePhoneInput,
+                        profileNotesInput: initialProfileInputs.profileNotesInput
+                    }, {
+                        fullName: cachedProfileIdentity.fullName || '',
+                        nickname: '',
+                        email: cachedProfileIdentity.email || '',
+                        phone: '',
+                        notes: ''
+                    });
+                }
 
-            // Always start from a fresh local chat session when the extension loads.
-            resetConversationState();
+                await refreshKeepAcrossTabsState({ hideInlineUiOnActive: false });
 
-            const storedAuthSession = normalizeStoredAuthSession(result[AUTH_SESSION_KEY]);
-            const hasStoredAuthSession = !!storedAuthSession;
-            // Do not block the UI on startup auth restoration; API requests already refresh tokens on demand.
-            setAuthSession(storedAuthSession, { persist: false, verified: hasStoredAuthSession });
-            isAuthRestoreInFlight = false;
+                const persistedConversation = IS_SIDEPANEL_SURFACE && keepAcrossTabsState.active
+                    ? getPersistedConversationSnapshot(result)
+                    : null;
+                if (persistedConversation) {
+                    applyConversationState({
+                        sessionId: persistedConversation.sessionId,
+                        sessionUrl: persistedConversation.sessionUrl || sessionUrl,
+                        history: persistedConversation.history,
+                        updatedAt: persistedConversation.updatedAt,
+                        persist: false,
+                        withTypewriter: false
+                    });
+                } else {
+                    // Always start from a fresh local chat session when the content-surface extension loads.
+                    resetConversationState();
+                }
 
-            if (result.screenchat_user || result.messageCount) {
-                storageRemoveSafe(['screenchat_user', 'messageCount']);
-            }
+                const storedAuthSession = normalizeStoredAuthSession(result[AUTH_SESSION_KEY]);
+                const hasStoredAuthSession = !!storedAuthSession;
+                // Do not block the UI on startup auth restoration; API requests already refresh tokens on demand.
+                setAuthSession(storedAuthSession, { persist: false, verified: hasStoredAuthSession });
+                isAuthRestoreInFlight = false;
 
-            const messagesArea = shadowRoot.getElementById('sc-messages');
-            if (messagesArea && !messagesArea.querySelector('.sc-message')) {
-                renderWelcomeMessage(false);
-            }
+                if (result.screenchat_user || result.messageCount) {
+                    storageRemoveSafe(['screenchat_user', 'messageCount']);
+                }
 
-            syncAuthUi();
-            syncQuickPromptsVisibility();
-            refreshProfileNudgeVisibility();
+                const messagesArea = shadowRoot.getElementById('sc-messages');
+                if (messagesArea && !messagesArea.querySelector('.sc-message')) {
+                    renderWelcomeMessage(false);
+                }
+
+                syncAuthUi();
+                syncQuickPromptsVisibility();
+                refreshProfileNudgeVisibility();
+                syncKeepAcrossTabsUi();
+            })().catch((error) => {
+                console.warn('[Init] ScreenChat bootstrap failed:', error);
+                resetConversationState();
+                syncAuthUi();
+                syncQuickPromptsVisibility();
+                refreshProfileNudgeVisibility();
+                syncKeepAcrossTabsUi();
+            });
         });
     }
 
@@ -3465,14 +4046,19 @@
     function createUI() {
         container = document.createElement('div');
         container.className = 'sc-shell';
+        container.dataset.scSurface = APP_SURFACE;
         const logoUrl = chrome.runtime.getURL('icons/icon48.png');
+        const sidebarOpenStyleIllustrationUrl = chrome.runtime.getURL('icons/svgs/open-style-sidebar.svg');
+        const windowOpenStyleIllustrationUrl = chrome.runtime.getURL('icons/svgs/open-style-window.svg');
+        const keepAcrossTabsIconUrl = getUiSvgUrl('pin.svg');
         const historyIconUrl = getUiSvgUrl('clock.svg');
         const chatIconUrl = getUiSvgUrl('comment-dots.svg');
         const profileIconUrl = getUiSvgUrl('user.svg');
         const closeIconUrl = getUiSvgUrl('times-square.svg');
         const backIconUrl = getUiSvgUrl('arrow-left.svg');
         const attachIconUrl = getAttachScreenIconUrl(attachScreenEnabled);
-        const sendIconUrl = getUiSvgUrl('send.svg');
+        const sendIconUrl = getPrimaryActionIconUrl();
+        const searchIconUrl = getUiSvgUrl('search.svg');
         const toolbarTrashIconUrl = getUiSvgUrl('Icon Button.svg');
         const logoutIconUrl = getUiSvgUrl('Log out.svg');
 
@@ -3499,6 +4085,9 @@
                         </div>
                         <div class="sc-header-actions">
                             <div class="sc-header-actions-extra">
+                                <button class="sc-btn-icon" id="sc-keep-across-tabs" title="Keep across tabs" aria-label="Keep across tabs" aria-pressed="false">
+                                    <img src="${keepAcrossTabsIconUrl}" class="sc-icon-img" alt="" aria-hidden="true">
+                                </button>
                                 <button class="sc-btn-icon" id="sc-history-btn" title="History" aria-label="History">
                                     <img src="${historyIconUrl}" class="sc-icon-img" alt="" aria-hidden="true">
                                 </button>
@@ -3597,9 +4186,7 @@
                 <div class="sc-pane" id="sc-history-view">
                     <div class="sc-pane-header">
                         <button class="sc-btn-icon sc-back-btn" id="sc-history-close" aria-label="Back to chat">
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                <path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                            </svg>
+                            <img src="${backIconUrl}" class="sc-icon-img sc-icon-img-back" alt="" aria-hidden="true">
                         </button>
                         <div class="sc-pane-heading">
                             <h3>History</h3>
@@ -3608,10 +4195,7 @@
                     </div>
                     <div class="sc-history-tools">
                         <button class="sc-btn-icon sc-tool-btn" id="sc-history-search-toggle" type="button" title="Search history" aria-label="Search history" aria-expanded="false" aria-controls="sc-history-search-wrap">
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-                                <circle cx="10.5" cy="10.5" r="5.5" stroke="currentColor" stroke-width="2"></circle>
-                                <path d="M15 15l4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
-                            </svg>
+                            <img src="${searchIconUrl}" class="sc-icon-img sc-tool-icon" alt="" aria-hidden="true">
                         </button>
                         <button class="sc-btn-icon sc-tool-btn" id="sc-history-clear" type="button" title="Clear all conversations" aria-label="Clear all conversations">
                             <img src="${toolbarTrashIconUrl}" class="sc-icon-img sc-tool-icon" alt="" aria-hidden="true">
@@ -3626,9 +4210,7 @@
                 <div class="sc-pane" id="sc-profile-view">
                     <div class="sc-pane-header">
                         <button class="sc-btn-icon sc-back-btn" id="sc-profile-close" aria-label="Back to chat">
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-                                <path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                            </svg>
+                            <img src="${backIconUrl}" class="sc-icon-img sc-icon-img-back" alt="" aria-hidden="true">
                         </button>
                         <div class="sc-pane-heading">
                             <h3>Profile</h3>
@@ -3667,6 +4249,27 @@
                             <label for="sc-profile-notes">Notes</label>
                             <textarea id="sc-profile-notes" placeholder="I work at google, prefer formal responses"></textarea>
                         </div>
+                        <section class="sc-profile-settings-group" aria-labelledby="sc-default-open-style-label">
+                            <div class="sc-profile-settings-copy">
+                                <p class="sc-profile-settings-label" id="sc-default-open-style-label">Default Opening Style</p>
+                            </div>
+                            <div class="sc-open-style-grid" role="radiogroup" aria-labelledby="sc-default-open-style-label">
+                                <label class="sc-open-style-option ${preferredOpenStyle === 'window' ? 'selected' : ''}">
+                                    <input class="sc-open-style-input" type="radio" name="sc-default-open-style" value="window"${preferredOpenStyle === 'window' ? ' checked' : ''}>
+                                    <img src="${windowOpenStyleIllustrationUrl}" class="sc-open-style-illustration" alt="" aria-hidden="true">
+                                    <span class="sc-open-style-name">Chat Window</span>
+                                </label>
+                                <label class="sc-open-style-option ${preferredOpenStyle === 'sidebar' ? 'selected' : ''}">
+                                    <input class="sc-open-style-input" type="radio" name="sc-default-open-style" value="sidebar"${preferredOpenStyle === 'sidebar' ? ' checked' : ''}>
+                                    <img src="${sidebarOpenStyleIllustrationUrl}" class="sc-open-style-illustration" alt="" aria-hidden="true">
+                                    <span class="sc-open-style-name">Sidebar</span>
+                                </label>
+                            </div>
+                        </section>
+                        <div class="sc-profile-shortcut-row">
+                            <span class="sc-profile-shortcut-label">Shortcut</span>
+                            <a class="sc-profile-shortcut-link" id="sc-profile-shortcut-link" href="chrome://extensions/shortcuts" target="_blank" rel="noreferrer">Open settings</a>
+                        </div>
                         <button class="sc-profile-save" id="sc-profile-save" type="button">Save</button>
                         <div class="sc-profile-footer">
                         <button class="sc-profile-signout" id="sc-profile-signout" type="button" title="Sign out" aria-label="Sign out">
@@ -3680,27 +4283,19 @@
                 <nav class="sc-bottom-nav" aria-label="ScreenChat sections">
                     <button class="sc-nav-btn" id="sc-pane-chat" type="button" aria-label="Chat">
                         <span class="sc-nav-icon" aria-hidden="true">
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-                                <path d="M6.5 8.5h11M6.5 12h7.5M8 18.5l-3.5 2v-4A7.5 7.5 0 014 4.5h16v12A2.5 2.5 0 0117.5 19h-7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-                            </svg>
+                            <img src="${chatIconUrl}" class="sc-icon-img sc-nav-icon-img" alt="" aria-hidden="true">
                         </span>
                         <span class="sc-nav-label">Chat</span>
                     </button>
                     <button class="sc-nav-btn" id="sc-pane-history" type="button" aria-label="History">
                         <span class="sc-nav-icon" aria-hidden="true">
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-                                <path d="M3 12a9 9 0 109-9 9.2 9.2 0 00-6.36 2.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-                                <path d="M3 4v4h4M12 7v5l3 2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-                            </svg>
+                            <img src="${historyIconUrl}" class="sc-icon-img sc-nav-icon-img" alt="" aria-hidden="true">
                         </span>
                         <span class="sc-nav-label">History</span>
                     </button>
                     <button class="sc-nav-btn" id="sc-pane-profile" type="button" aria-label="Profile">
                         <span class="sc-nav-icon" aria-hidden="true">
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-                                <circle cx="12" cy="8" r="3.3" stroke="currentColor" stroke-width="1.8"/>
-                                <path d="M5.5 19.2c1.55-2.56 3.9-3.84 6.5-3.84s4.95 1.28 6.5 3.84" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-                            </svg>
+                            <img src="${profileIconUrl}" class="sc-icon-img sc-nav-icon-img" alt="" aria-hidden="true">
                         </span>
                         <span class="sc-nav-label">Profile</span>
                     </button>
@@ -3731,6 +4326,7 @@
         setActivePane(isAuthenticated() ? 'chat' : 'auth', false);
         setupEventListeners();
         syncAuthUi();
+        syncKeepAcrossTabsUi();
     }
 
     function setupEventListeners() {
@@ -3743,6 +4339,7 @@
         const historyPaneBtn = shadowRoot.getElementById('sc-pane-history');
         const profilePaneBtn = shadowRoot.getElementById('sc-pane-profile');
 
+        const keepAcrossTabsBtn = shadowRoot.getElementById('sc-keep-across-tabs');
         const historyBtn = shadowRoot.getElementById('sc-history-btn');
         const profileBtn = shadowRoot.getElementById('sc-profile-btn');
 
@@ -3762,12 +4359,14 @@
         const googleSignInBtn = shadowRoot.getElementById('sc-google-signin-btn');
 
         const profileSaveBtn = shadowRoot.getElementById('sc-profile-save');
+        const profileShortcutLink = shadowRoot.getElementById('sc-profile-shortcut-link');
         const profileSignOutBtn = shadowRoot.getElementById('sc-profile-signout');
         const profileNameInput = shadowRoot.getElementById('sc-profile-name');
         const profileNicknameInput = shadowRoot.getElementById('sc-profile-nickname');
         const profileEmailInput = shadowRoot.getElementById('sc-profile-email');
         const profilePhoneInput = shadowRoot.getElementById('sc-profile-phone');
         const profileNotesInput = shadowRoot.getElementById('sc-profile-notes');
+        const defaultOpenStyleInputs = Array.from(shadowRoot.querySelectorAll('input[name="sc-default-open-style"]'));
         const profileNudgeSkipBtn = shadowRoot.getElementById('sc-profile-nudge-skip');
         const profileNudgeStopBtn = shadowRoot.getElementById('sc-profile-nudge-stop');
 
@@ -3791,6 +4390,7 @@
             chatPaneBtn,
             historyPaneBtn,
             profilePaneBtn,
+            keepAcrossTabsBtn,
             historyBtn,
             profileBtn,
             historyCloseBtn,
@@ -3799,8 +4399,38 @@
             attachScreenToggle,
             googleSignInBtn,
             profileSaveBtn,
+            profileShortcutLink,
             profileSignOutBtn
         ].forEach(bindPressScale);
+
+        if (keepAcrossTabsBtn) {
+            keepAcrossTabsBtn.addEventListener('click', () => {
+                toggleKeepAcrossTabs();
+            });
+        }
+
+        if (profileShortcutLink instanceof HTMLAnchorElement) {
+            const shortcutSettings = getShortcutSettingsInfo();
+            profileShortcutLink.href = shortcutSettings.url;
+            profileShortcutLink.title = `Open ${shortcutSettings.browserName} shortcut settings`;
+            profileShortcutLink.setAttribute('aria-label', `Open ${shortcutSettings.browserName} shortcut settings`);
+            profileShortcutLink.addEventListener('click', async (event) => {
+                event.preventDefault();
+                try {
+                    await openShortcutSettings();
+                } catch (error) {
+                    console.warn('[Shortcuts] Open settings failed:', error);
+                }
+            });
+        }
+
+        defaultOpenStyleInputs.forEach((input) => {
+            input.addEventListener('change', () => {
+                if (!input.checked) return;
+                setPreferredOpenStyle(input.value);
+            });
+        });
+        syncPreferredOpenStyleUi();
 
         function syncProfileState(profile) {
             const storedProfile = profile && typeof profile === 'object' && !Array.isArray(profile)
@@ -3835,12 +4465,12 @@
 
         function setProfileSignOutState(state = 'idle') {
             if (!profileSignOutBtn) return;
+            const loadingIconUrl = getUiSvgUrl('loader.svg');
+            const errorIconUrl = getUiSvgUrl('circle-slash.svg');
+            const idleIconUrl = getUiSvgUrl('Log out.svg');
             if (state === 'loading') {
                 profileSignOutBtn.innerHTML = `
-                    <svg class="sc-profile-signout-icon sc-icon-spin" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                        <circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="2" opacity="0.28"></circle>
-                        <path d="M12 4a8 8 0 017.7 5.9" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
-                    </svg>
+                    <img src="${loadingIconUrl}" class="sc-profile-signout-icon sc-icon-spin" alt="" aria-hidden="true">
                     <span class="sc-visually-hidden">Signing out</span>
                 `;
                 profileSignOutBtn.setAttribute('title', 'Signing out...');
@@ -3849,11 +4479,7 @@
             }
             if (state === 'error') {
                 profileSignOutBtn.innerHTML = `
-                    <svg class="sc-profile-signout-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                        <path d="M12 3.6l8.2 14.2c.42.73-.1 1.64-.94 1.64H4.72c-.84 0-1.36-.91-.94-1.64L12 3.6z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"></path>
-                        <path d="M12 8.9v4.9" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
-                        <circle cx="12" cy="16.8" r="1" fill="currentColor"></circle>
-                    </svg>
+                    <img src="${errorIconUrl}" class="sc-profile-signout-icon" alt="" aria-hidden="true">
                     <span class="sc-visually-hidden">Sign out failed</span>
                 `;
                 profileSignOutBtn.setAttribute('title', 'Sign out failed. Try again.');
@@ -3861,7 +4487,7 @@
                 return;
             }
             profileSignOutBtn.innerHTML = `
-                <img src="${getUiSvgUrl('Log out.svg')}" class="sc-profile-signout-icon" alt="" aria-hidden="true">
+                <img src="${idleIconUrl}" class="sc-profile-signout-icon" alt="" aria-hidden="true">
                 <span class="sc-visually-hidden">Sign out</span>
             `;
             profileSignOutBtn.setAttribute('title', 'Sign out');
@@ -4988,13 +5614,6 @@
             });
         }
 
-        quickPromptButtons.forEach((btn) => {
-            btn.addEventListener('click', () => {
-                textarea.value = btn.dataset.prompt || '';
-                handleSend();
-            });
-        });
-
         function resizeChatTextarea() {
             if (!textarea) return;
             const minHeight = 28;
@@ -5009,7 +5628,52 @@
 
         resizeChatTextarea();
 
-        const handleSend = async () => {
+        function canContinueResponseRequest(requestId) {
+            return activeResponseRequestId === requestId && !activeResponseStopRequested;
+        }
+
+        function assertResponseRequestCanContinue(requestId) {
+            if (!canContinueResponseRequest(requestId)) {
+                throw createAbortError();
+            }
+        }
+
+        function finalizeResponseRequest(requestId, requestAbortController = null) {
+            if (requestAbortController && currentAbortController === requestAbortController) {
+                currentAbortController = null;
+            }
+            if (activeResponseRequestId !== requestId) {
+                return false;
+            }
+            activeResponseRequestId = 0;
+            activeResponseStopRequested = false;
+            isAwaitingResponse = false;
+            setInputState(true);
+            syncQuickPromptsVisibility();
+            return true;
+        }
+
+        function stopCurrentResponse(source = 'user') {
+            if (!isAwaitingResponse || !activeResponseRequestId) return false;
+            activeResponseStopRequested = true;
+            const abortController = currentAbortController;
+            currentAbortController = null;
+            console.info('[Chat] Stop requested', {
+                source,
+                activeResponseRequestId,
+                hadAbortController: !!abortController
+            });
+            if (abortController) {
+                try {
+                    abortController.abort();
+                } catch (error) {
+                    console.warn('[Chat] Stop request failed:', error);
+                }
+            }
+            return true;
+        }
+
+        const handleSend = async ({ replaceActiveResponse = false, source = 'button' } = {}) => {
             if (!isAuthenticated()) {
                 setActivePane('auth');
                 setAuthStatus('Please sign in with Google to continue.', false);
@@ -5017,6 +5681,13 @@
             }
 
             const text = textarea.value.trim();
+            if (isAwaitingResponse) {
+                if (!text || !replaceActiveResponse) {
+                    stopCurrentResponse(source);
+                    return;
+                }
+                stopCurrentResponse(`${source}_replace`);
+            }
             if (!text) return;
 
             textarea.value = '';
@@ -5024,13 +5695,16 @@
             hasLocalConversationMutation = true;
 
             const userMessageTimestamp = new Date().toISOString();
-            addMessage(text, 'user', null, false, userMessageTimestamp, true);
+            const userMessageEl = addMessage(text, 'user', null, false, userMessageTimestamp, true);
 
             conversationHistory.push({ role: 'user', content: text, timestamp: userMessageTimestamp });
             sessionUpdatedAt = userMessageTimestamp;
             persistConversationState({ updatedAt: userMessageTimestamp });
             syncQuickPromptsVisibility();
 
+            const requestId = ++responseRequestCounter;
+            activeResponseRequestId = requestId;
+            activeResponseStopRequested = false;
             isAwaitingResponse = true;
             setInputState(false, 'Working...');
             syncQuickPromptsVisibility();
@@ -5042,6 +5716,7 @@
             let streamCancelled = false;
             let requestTimedOut = false;
             let requestTimeoutId = null;
+            let requestAbortController = null;
 
             const renderStreamMessage = () => {
                 if (streamCancelled) return;
@@ -5066,6 +5741,39 @@
                 });
             };
 
+            const preservePartialResponse = () => {
+                const partialResponseText = cleanAiReply(latestStreamText);
+                if (!partialResponseText) {
+                    removeMessage(loadingId);
+                    return false;
+                }
+
+                removeMessage(loadingId);
+                if (!streamedMessageEl) {
+                    streamedMessageEl = addMessage('', 'ai', null, true);
+                }
+                updateMessageContent(streamedMessageEl, partialResponseText);
+                const assistantMessageTimestamp = new Date().toISOString();
+                setMessageTimestamp(streamedMessageEl, assistantMessageTimestamp);
+
+                const partialAssistantEntry = {
+                    role: 'assistant',
+                    content: partialResponseText,
+                    timestamp: assistantMessageTimestamp
+                };
+                const relatedUserMessageIndex = conversationHistory.findIndex((entry) => (
+                    entry?.role === 'user' && entry?.timestamp === userMessageTimestamp
+                ));
+                if (relatedUserMessageIndex >= 0) {
+                    conversationHistory.splice(relatedUserMessageIndex + 1, 0, partialAssistantEntry);
+                } else {
+                    conversationHistory.push(partialAssistantEntry);
+                }
+                sessionUpdatedAt = assistantMessageTimestamp;
+                persistConversationState({ updatedAt: assistantMessageTimestamp });
+                return true;
+            };
+
             try {
                 const messagesPayload = conversationHistory.map((msg) => {
                     const normalizedRole = normalizeConversationRole(msg?.role);
@@ -5086,6 +5794,7 @@
                     return msg;
                 });
                 const activeTabUrl = await getActiveTabUrl();
+                assertResponseRequestCanContinue(requestId);
                 sessionUrl = activeTabUrl || window.location.href || sessionUrl;
                 const messagesWithPageContext = attachCurrentPageUrlContext(messagesPayload, sessionUrl);
 
@@ -5093,15 +5802,19 @@
                 if (attachScreenEnabled) {
                     try {
                         attachedImage = await captureCurrentScreen();
-                    } catch (captureError) {
-                        console.warn('[ScreenCapture] Capture failed:', captureError);
-                        if (isCapturePermissionError(captureError)) {
-                            setAttachScreenEnabled(false);
+                        assertResponseRequestCanContinue(requestId);
+                        if (attachedImage && userMessageEl?.isConnected) {
+                            updateMessageContent(userMessageEl, text, attachedImage, { forceScroll: true });
                         }
+                    } catch {
+                        // Keep the request going even if screenshot capture fails.
                     }
                 }
 
-                currentAbortController = new AbortController();
+                assertResponseRequestCanContinue(requestId);
+                requestAbortController = new AbortController();
+                currentAbortController = requestAbortController;
+                assertResponseRequestCanContinue(requestId);
 
                 const chatPayload = {
                     messages: messagesWithPageContext,
@@ -5110,19 +5823,19 @@
                     activeTabUrl,
                     profile: userProfile,
                     image: attachedImage,
-                    clientContext: buildClientContext()
+                    clientContext: buildClientContext(sessionUrl)
                 };
 
                 const responseText = await Promise.race([
                     requestChatReply(chatPayload, {
-                        signal: currentAbortController.signal,
+                        signal: requestAbortController.signal,
                         onPartialText
                     }),
                     new Promise((_, reject) => {
                         requestTimeoutId = setTimeout(() => {
                             requestTimedOut = true;
                             try {
-                                currentAbortController?.abort();
+                                requestAbortController?.abort();
                             } catch {
                                 // No-op.
                             }
@@ -5132,6 +5845,7 @@
                         }, CHAT_REQUEST_TIMEOUT_MS);
                     })
                 ]);
+                assertResponseRequestCanContinue(requestId);
 
                 if (streamRenderPending) {
                     streamRenderPending = false;
@@ -5157,33 +5871,25 @@
                 });
                 sessionUpdatedAt = assistantMessageTimestamp;
                 persistConversationState({ updatedAt: assistantMessageTimestamp });
-                isAwaitingResponse = false;
-                setInputState(true);
-                syncQuickPromptsVisibility();
+                finalizeResponseRequest(requestId, requestAbortController);
             } catch (backendErr) {
                 if (requestTimeoutId) {
                     clearTimeout(requestTimeoutId);
                     requestTimeoutId = null;
                 }
                 streamCancelled = true;
-                if (streamedMessageEl?.isConnected) {
-                    streamedMessageEl.remove();
-                }
                 if (backendErr.name === 'AbortError' || backendErr.name === 'TimeoutError') {
-                    removeMessage(loadingId);
-                    isAwaitingResponse = false;
-                    setInputState(true);
-                    if (requestTimedOut) {
+                    const preservedPartialResponse = preservePartialResponse();
+                    if (requestTimedOut && !preservedPartialResponse) {
                         addMessage(`Request timed out after ${Math.floor(CHAT_REQUEST_TIMEOUT_MS / 1000)} seconds. Please try again.`, 'ai');
                         conversationHistory.pop();
                         persistConversationState({ updatedAt: getLatestConversationTimestamp(conversationHistory) });
                     }
-                    syncQuickPromptsVisibility();
+                    finalizeResponseRequest(requestId, requestAbortController);
                     return;
                 }
                 removeMessage(loadingId);
-                isAwaitingResponse = false;
-                setInputState(true);
+                finalizeResponseRequest(requestId, requestAbortController);
                 const backendMessage = backendErr?.message || 'Unknown error';
                 if (isAuthErrorMessage(backendMessage)) {
                     requireAuthenticationUi('Session expired. Please sign in again.');
@@ -5203,12 +5909,21 @@
             }
         };
 
-        sendBtn.addEventListener('click', handleSend);
+        quickPromptButtons.forEach((btn) => {
+            btn.addEventListener('click', () => {
+                textarea.value = btn.dataset.prompt || '';
+                handleSend({ source: 'quick_prompt', replaceActiveResponse: true });
+            });
+        });
+
+        sendBtn.addEventListener('click', () => {
+            handleSend({ source: 'button', replaceActiveResponse: false });
+        });
 
         const onEnter = (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                handleSend();
+                handleSend({ source: 'enter', replaceActiveResponse: true });
             }
         };
 
@@ -5447,15 +6162,12 @@
             isElementNearScrollBottom(messagesArea)
         );
 
-        const attachmentHtml = imageUrl
-            ? `<div class="sc-attachment"><img src="${imageUrl}" alt="Screenshot"></div>`
-            : '';
         const isAiMessage = messageEl.classList.contains('ai');
         const normalizedText = isAiMessage
             ? cleanAiReply(text, { allowPartial })
             : (typeof text === 'string' ? text : String(text ?? ''));
         const formattedText = formatMessageContent(normalizedText, { enableMarkdown: isAiMessage });
-        bubble.innerHTML = `${formattedText}${attachmentHtml}`;
+        bubble.innerHTML = formattedText;
 
         if (shouldAutoScroll) {
             scrollMessagesToBottom({ force: true });
@@ -6183,11 +6895,20 @@
     function setInputState(enabled, placeholder = "Ask me anything...") {
         const textarea = shadowRoot.getElementById('sc-chat-input');
         const sendBtn = shadowRoot.getElementById('sc-send');
+        const sendIcon = sendBtn?.querySelector('.sc-send-icon');
         if (textarea && sendBtn) {
-            textarea.disabled = !enabled;
-            sendBtn.disabled = !enabled;
-            textarea.placeholder = placeholder;
-            if (enabled) {
+            const isComposerInteractive = !!enabled || isAwaitingResponse;
+            textarea.disabled = !isComposerInteractive;
+            sendBtn.disabled = !isComposerInteractive;
+            textarea.placeholder = getChatInputPlaceholder(placeholder);
+            textarea.setAttribute('aria-busy', isAwaitingResponse ? 'true' : 'false');
+            sendBtn.classList.toggle('is-stop', isAwaitingResponse);
+            sendBtn.setAttribute('aria-label', getPrimaryActionControlLabel());
+            sendBtn.setAttribute('title', getPrimaryActionTooltip());
+            if (sendIcon) {
+                sendIcon.src = getPrimaryActionIconUrl();
+            }
+            if (isComposerInteractive) {
                 textarea.focus();
             }
         }

@@ -6,9 +6,16 @@
     "description": "Chat with your screen. AI chat that sees your page and helps answer questions.",
     "permissions": [
         "activeTab",
+        "sidePanel",
         "storage",
         "scripting"
     ],
+    "host_permissions": [
+        "<all_urls>"
+    ],
+    "side_panel": {
+        "default_path": "sidepanel.html"
+    },
     "action": {
         "default_title": "Open ScreenChat",
         "default_icon": {
