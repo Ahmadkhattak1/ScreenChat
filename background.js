@@ -2,24 +2,28 @@
 
 const RUNTIME_CONFIG_URL = chrome.runtime.getURL('runtime-config.json');
 const KEEP_ACROSS_TABS_STATE_KEY = 'screenchat_keep_across_tabs_v1';
-const DEFAULT_OPEN_STYLE_KEY = 'screenchat_default_open_style_v1';
+const SCREENCHAT_COMMAND_NAME = 'toggle-screenchat';
 const HOTKEY_DEBUG_ENABLED = false;
 let hotkeyRequestCounter = 0;
 let runtimeConfigLoadPromise = null;
 let allowedApiOrigins = new Set();
-let preferredOpenStyle = 'window';
-
-hydratePreferredOpenStyle().finally(() => {
-    queueSidePanelActionBehaviorSync('startup');
-});
-chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName !== 'local' || !changes?.[DEFAULT_OPEN_STYLE_KEY]) return;
-    setPreferredOpenStyle(changes[DEFAULT_OPEN_STYLE_KEY].newValue);
-    console.info('[OpenStyle][Background] Preferred open style changed', {
-        preferredOpenStyle
-    });
-    queueSidePanelActionBehaviorSync('storage_change');
-});
+const EXTRA_ALLOWED_PROXY_ORIGINS = new Set([
+    'https://api.openai.com',
+    'https://api.anthropic.com',
+    'https://generativelanguage.googleapis.com',
+    'https://integrate.api.nvidia.com',
+    'https://openrouter.ai'
+]);
+const ALLOWED_PROXY_METHODS = new Set(['GET', 'POST']);
+const ALLOWED_PROXY_HEADERS = new Set([
+    'accept',
+    'anthropic-version',
+    'authorization',
+    'content-type',
+    'x-api-key',
+    'x-goog-api-key'
+]);
+queueSidePanelActionBehaviorSync('startup');
 
 function hotkeyLog(event, details = {}) {
     if (!HOTKEY_DEBUG_ENABLED) return;
@@ -29,69 +33,18 @@ function hotkeyLog(event, details = {}) {
     });
 }
 
-function normalizePreferredOpenStyle(rawValue) {
-    const normalizedValue = typeof rawValue === 'string' ? rawValue.trim().toLowerCase() : '';
-    return normalizedValue === 'sidebar' ? 'sidebar' : 'window';
-}
-
-function setPreferredOpenStyle(rawValue) {
-    preferredOpenStyle = normalizePreferredOpenStyle(rawValue);
-    return preferredOpenStyle;
-}
-
 async function syncSidePanelActionBehavior(reason = 'unknown') {
     if (typeof chrome.sidePanel?.setPanelBehavior !== 'function') {
-        console.info('[OpenStyle][Background] sidePanel.setPanelBehavior unavailable', {
-            reason,
-            preferredOpenStyle
-        });
         return;
     }
 
-    const openPanelOnActionClick = preferredOpenStyle === 'sidebar';
-    console.info('[OpenStyle][Background] Syncing action click behavior', {
-        reason,
-        preferredOpenStyle,
-        openPanelOnActionClick
-    });
-    await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick });
-    console.info('[OpenStyle][Background] Action click behavior synced', {
-        reason,
-        preferredOpenStyle,
-        openPanelOnActionClick
-    });
+    await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 }
 
 function queueSidePanelActionBehaviorSync(reason) {
     syncSidePanelActionBehavior(reason).catch((error) => {
-        console.warn('[OpenStyle][Background] Failed to sync action click behavior', {
-            reason,
-            preferredOpenStyle,
-            error: error?.message || String(error)
-        });
+        console.warn('Failed to sync side panel action click behavior:', error);
     });
-}
-
-async function hydratePreferredOpenStyle() {
-    try {
-        const storedValue = await chrome.storage.local.get(DEFAULT_OPEN_STYLE_KEY);
-        setPreferredOpenStyle(storedValue?.[DEFAULT_OPEN_STYLE_KEY]);
-        console.info('[OpenStyle][Background] Preferred open style hydrated', {
-            preferredOpenStyle
-        });
-    } catch {
-        setPreferredOpenStyle('window');
-        console.warn('[OpenStyle][Background] Failed to hydrate preferred open style, defaulting to window');
-    }
-}
-
-function shouldFallbackFromSidebarOpenError(error) {
-    const message = String(error?.message || '').trim().toLowerCase();
-    if (!message) return true;
-    return (
-        message.includes('browser sidebar is not available') ||
-        message.includes('unable to resolve the current browser window')
-    );
 }
 
 function isPrivateIpv4Address(hostname = '') {
@@ -184,10 +137,24 @@ async function ensureRuntimeConfigLoaded() {
 function isAllowedApiRequestUrl(rawUrl = '') {
     try {
         const parsed = new URL(rawUrl);
-        return allowedApiOrigins.has(parsed.origin);
+        return allowedApiOrigins.has(parsed.origin) || EXTRA_ALLOWED_PROXY_ORIGINS.has(parsed.origin);
     } catch {
         return false;
     }
+}
+
+function sanitizeProxyHeaders(sourceHeaders) {
+    if (!sourceHeaders || typeof sourceHeaders !== 'object') return undefined;
+
+    const headers = {};
+    Object.entries(sourceHeaders).forEach(([rawName, rawValue]) => {
+        const name = typeof rawName === 'string' ? rawName.trim().toLowerCase() : '';
+        if (!ALLOWED_PROXY_HEADERS.has(name)) return;
+        if (typeof rawValue !== 'string') return;
+        headers[name] = rawValue;
+    });
+
+    return Object.keys(headers).length ? headers : undefined;
 }
 
 function buildProxyRequestConfig(payload) {
@@ -197,19 +164,49 @@ function buildProxyRequestConfig(payload) {
     }
 
     const sourceOptions = payload?.options && typeof payload.options === 'object' ? payload.options : {};
-    const method = typeof sourceOptions.method === 'string' ? sourceOptions.method : 'GET';
-    const headers = sourceOptions.headers && typeof sourceOptions.headers === 'object'
-        ? sourceOptions.headers
-        : undefined;
+    const method = (typeof sourceOptions.method === 'string' ? sourceOptions.method : 'GET').trim().toUpperCase();
+    if (!ALLOWED_PROXY_METHODS.has(method)) {
+        throw new Error('Blocked API request method');
+    }
+    const headers = sanitizeProxyHeaders(sourceOptions.headers);
     const body = typeof sourceOptions.body === 'string' ? sourceOptions.body : undefined;
 
     return { requestUrl, method, headers, body };
+}
+
+function isTrustedRuntimeSender(sender) {
+    return !sender?.id || sender.id === chrome.runtime.id;
 }
 
 function getShortcutSettingsUrl(browser = '') {
     return String(browser || '').trim().toLowerCase() === 'edge'
         ? 'edge://extensions/shortcuts'
         : 'chrome://extensions/shortcuts';
+}
+
+async function getShortcutInfo() {
+    if (typeof chrome.commands?.getAll !== 'function') {
+        throw new Error('Browser shortcut API is not available');
+    }
+
+    const commands = await chrome.commands.getAll();
+    const shortcutCommand = Array.isArray(commands)
+        ? commands.find((command) => command?.name === SCREENCHAT_COMMAND_NAME)
+        : null;
+    const shortcut = typeof shortcutCommand?.shortcut === 'string'
+        ? shortcutCommand.shortcut.trim()
+        : '';
+    const primaryShortcut = shortcut;
+    const primarySource = shortcut ? 'command' : 'none';
+
+    return {
+        ok: true,
+        commandName: SCREENCHAT_COMMAND_NAME,
+        shortcut: primaryShortcut,
+        isAssigned: !!primaryShortcut,
+        source: primarySource,
+        commandShortcut: shortcut
+    };
 }
 
 function normalizeWorkflowEntry(rawWorkflow) {
@@ -304,6 +301,23 @@ function buildWorkflowStateResponse(windowId, workflow, extra = {}) {
 async function getActiveTabForWindow(windowId) {
     if (!Number.isInteger(windowId)) return null;
     const [activeTab] = await chrome.tabs.query({ active: true, windowId });
+    return activeTab || null;
+}
+
+async function getActiveTabForCommand() {
+    if (typeof chrome.windows?.getLastFocused === 'function') {
+        try {
+            const lastFocusedWindow = await chrome.windows.getLastFocused({ populate: false });
+            const activeTab = await getActiveTabForWindow(lastFocusedWindow?.id);
+            if (activeTab) {
+                return activeTab;
+            }
+        } catch {
+            // Fall through to a broader tab query when the focused window cannot be resolved.
+        }
+    }
+
+    const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     return activeTab || null;
 }
 
@@ -427,13 +441,7 @@ async function openKeepAcrossTabsPanel(windowId) {
     if (typeof chrome.sidePanel?.open !== 'function') {
         throw new Error('Browser sidebar is not available in this version of Edge.');
     }
-    console.info('[OpenStyle][Background] Calling chrome.sidePanel.open', {
-        windowId
-    });
     await chrome.sidePanel.open({ windowId });
-    console.info('[OpenStyle][Background] chrome.sidePanel.open resolved', {
-        windowId
-    });
     return { ok: true, windowId };
 }
 
@@ -546,6 +554,10 @@ async function proxyApiStream(port, payload, abortController) {
 
 chrome.runtime.onConnect.addListener((port) => {
     if (port.name !== 'proxy_api_stream') return;
+    if (!isTrustedRuntimeSender(port.sender)) {
+        port.disconnect();
+        return;
+    }
 
     let disconnected = false;
     const abortController = new AbortController();
@@ -582,11 +594,14 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!isTrustedRuntimeSender(sender)) return undefined;
+
     const action = message?.action;
     const supportedActions = new Set([
         'capture_visible_tab',
         'get_active_tab_url',
         'get_keep_across_tabs_state',
+        'get_shortcut_info',
         'open_keep_across_tabs_panel',
         'open_side_panel',
         'open_shortcut_settings',
@@ -616,6 +631,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 return;
             }
 
+            if (action === 'get_shortcut_info') {
+                const result = await getShortcutInfo();
+                sendResponse(result);
+                return;
+            }
+
             if (action === 'open_keep_across_tabs_panel') {
                 const windowId = resolveWindowId(message, sender);
                 const workflow = await getWorkflowForWindow(windowId);
@@ -630,21 +651,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
             if (action === 'open_side_panel') {
                 const windowId = resolveWindowId(message, sender);
-                console.info('[OpenStyle][Background] Received open_side_panel request', {
-                    senderTabId: Number.isInteger(sender?.tab?.id) ? sender.tab.id : null,
-                    senderWindowId: Number.isInteger(sender?.tab?.windowId) ? sender.tab.windowId : null,
-                    requestedWindowId: Number.isInteger(message?.windowId) ? message.windowId : null,
-                    resolvedWindowId: Number.isInteger(windowId) ? windowId : null,
-                    preferredOpenStyle
-                });
                 if (!Number.isInteger(windowId)) {
                     throw new Error('Unable to resolve the current browser window');
                 }
                 const result = await openKeepAcrossTabsPanel(windowId);
-                console.info('[OpenStyle][Background] open_side_panel completed', {
-                    resolvedWindowId: windowId,
-                    ok: !!result?.ok
-                });
                 sendResponse(result);
                 return;
             }
@@ -682,10 +692,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 }
 
                 await setWorkflowForWindow(windowId, null);
-                const closeResult = await closeKeepAcrossTabsPanel(windowId);
-                await restoreInlineUiForWindow(windowId).catch(() => false);
                 sendResponse(buildWorkflowStateResponse(windowId, null, {
-                    closed: !!closeResult?.closed
+                    closed: false
                 }));
                 return;
             }
@@ -710,6 +718,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             if (action === 'open_shortcut_settings') {
                 console.warn('Shortcut settings open failed:', error);
                 sendResponse({ ok: false, error: error?.message || 'Unable to open shortcut settings' });
+                return;
+            }
+
+            if (action === 'get_shortcut_info') {
+                console.warn('Shortcut lookup failed:', error);
+                sendResponse({ ok: false, error: error?.message || 'Unable to fetch shortcut info' });
                 return;
             }
 
@@ -745,106 +759,13 @@ function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function openUi(tabId, attempts = 3, payload = {}) {
-    return sendUiAction(tabId, 'open_ui', attempts, payload);
-}
-
-async function restoreInlineUi(tabId, attempts = 3, payload = {}) {
-    return sendUiAction(tabId, 'restore_inline_ui', attempts, payload);
-}
-
-async function toggleUi(tabId, attempts = 3, payload = {}) {
-    return sendUiAction(tabId, 'hotkey_toggle_ui', attempts, payload);
-}
-
-async function sendUiAction(tabId, action, attempts = 3, payload = {}) {
-    let lastError = null;
-    for (let i = 0; i < attempts; i += 1) {
-        const attempt = i + 1;
-        try {
-            hotkeyLog('send_ui_action_attempt', {
-                tabId,
-                action,
-                attempt,
-                attempts,
-                hotkeyRequestId: payload.hotkeyRequestId || null
-            });
-            await chrome.tabs.sendMessage(tabId, { action, ...payload });
-            hotkeyLog('send_ui_action_success', {
-                tabId,
-                action,
-                attempt,
-                attempts,
-                hotkeyRequestId: payload.hotkeyRequestId || null
-            });
-            return;
-        } catch (e) {
-            lastError = e;
-            hotkeyLog('send_ui_action_error', {
-                tabId,
-                action,
-                attempt,
-                attempts,
-                hotkeyRequestId: payload.hotkeyRequestId || null,
-                error: e?.message || String(e)
-            });
-            if (i === attempts - 1) break;
-            await sleep(80);
-        }
-    }
-    throw lastError || new Error(`Failed to send UI action: ${action}`);
-}
-
 async function activateScreenChat(tab) {
-    console.info('[OpenStyle][Background] activateScreenChat start', {
-        tabId: Number.isInteger(tab?.id) ? tab.id : null,
-        windowId: Number.isInteger(tab?.windowId) ? tab.windowId : null,
-        url: tab?.url || null,
-        preferredOpenStyle
-    });
-    if (preferredOpenStyle === 'sidebar' && Number.isInteger(tab?.windowId)) {
-        try {
-            await openKeepAcrossTabsPanel(tab.windowId);
-            if (tab?.id && !isRestrictedUrl(tab.url || '')) {
-                await chrome.tabs.sendMessage(tab.id, { action: 'hide_ui' }).catch(() => {});
-            }
-            console.info('[OpenStyle][Background] activateScreenChat opened preferred sidebar');
-            return;
-        } catch (error) {
-            console.warn('Preferred sidebar open failed from action click:', error);
-            if (!shouldFallbackFromSidebarOpenError(error)) {
-                console.warn('[OpenStyle][Background] activateScreenChat returning after non-fallback sidebar error');
-                return;
-            }
-        }
-    }
-
-    const activeWorkflow = await getWorkflowForWindow(tab?.windowId);
-    if (activeWorkflow && Number.isInteger(tab?.windowId)) {
-        try {
-            await openKeepAcrossTabsPanel(tab.windowId);
-            return;
-        } catch (error) {
-            console.warn('Keep across tabs reopen failed from action click:', error);
-            await setWorkflowForWindow(tab.windowId, null).catch(() => {});
-        }
-    }
-
-    if (!tab?.id || isRestrictedUrl(tab.url || '')) {
-        return;
-    }
-    await dispatchUiAction(tab, 'open_ui');
+    if (!Number.isInteger(tab?.windowId)) return;
+    await openKeepAcrossTabsPanel(tab.windowId);
 }
 
 chrome.action.onClicked.addListener(async (tab) => {
     try {
-        if (preferredOpenStyle === 'sidebar') {
-            console.info('[OpenStyle][Background] Action click received while sidebar is preferred', {
-                tabId: Number.isInteger(tab?.id) ? tab.id : null,
-                windowId: Number.isInteger(tab?.windowId) ? tab.windowId : null
-            });
-        }
-
         await activateScreenChat(tab);
     } catch (err) {
         console.error('ScreenChat action click failed:', err);
@@ -856,7 +777,7 @@ chrome.commands.onCommand.addListener(async (command) => {
     hotkeyLog('command_received', { command });
 
     try {
-        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const activeTab = await getActiveTabForCommand();
         if (!activeTab) {
             hotkeyLog('command_no_active_tab');
             return;
@@ -873,44 +794,9 @@ chrome.commands.onCommand.addListener(async (command) => {
 });
 
 async function toggleScreenChatWithHotkey(tab) {
-    console.info('[OpenStyle][Background] toggleScreenChatWithHotkey start', {
-        tabId: Number.isInteger(tab?.id) ? tab.id : null,
-        windowId: Number.isInteger(tab?.windowId) ? tab.windowId : null,
-        url: tab?.url || null,
-        preferredOpenStyle
-    });
-    if (preferredOpenStyle === 'sidebar' && Number.isInteger(tab?.windowId)) {
-        try {
-            await openKeepAcrossTabsPanel(tab.windowId);
-            if (tab?.id && !isRestrictedUrl(tab.url || '')) {
-                await chrome.tabs.sendMessage(tab.id, { action: 'hide_ui' }).catch(() => {});
-            }
-            console.info('[OpenStyle][Background] toggleScreenChatWithHotkey opened preferred sidebar');
-            return;
-        } catch (error) {
-            console.warn('Preferred sidebar open failed from hotkey:', error);
-            if (!shouldFallbackFromSidebarOpenError(error)) {
-                console.warn('[OpenStyle][Background] toggleScreenChatWithHotkey returning after non-fallback sidebar error');
-                return;
-            }
-        }
-    }
-
-    const activeWorkflow = await getWorkflowForWindow(tab?.windowId);
-    if (activeWorkflow && Number.isInteger(tab?.windowId)) {
-        try {
-            await openKeepAcrossTabsPanel(tab.windowId);
-            return;
-        } catch (error) {
-            console.warn('Keep across tabs reopen failed from hotkey:', error);
-            await setWorkflowForWindow(tab.windowId, null).catch(() => {});
-        }
-    }
-
-    if (!tab?.id || isRestrictedUrl(tab.url || '')) {
+    if (!Number.isInteger(tab?.windowId)) {
         hotkeyLog('hotkey_toggle_skipped_restricted', {
-            tabId: tab?.id || null,
-            url: tab?.url || null
+            tabId: tab?.id || null
         });
         return;
     }
@@ -922,71 +808,11 @@ async function toggleScreenChatWithHotkey(tab) {
         url: tab.url || null,
         hotkeyRequestId
     });
-    await dispatchUiAction(tab, 'hotkey_toggle_ui', { hotkeyRequestId, hotkeyIssuedAt });
+    await openKeepAcrossTabsPanel(tab.windowId);
     hotkeyLog('hotkey_toggle_dispatch_done', {
-        tabId: tab.id,
+        tabId: tab.id || null,
         hotkeyRequestId
     });
-}
-
-async function dispatchUiAction(tab, action, payload = {}) {
-    hotkeyLog('dispatch_ui_action_start', {
-        tabId: tab.id,
-        action,
-        hotkeyRequestId: payload.hotkeyRequestId || null
-    });
-    // Fast path: content script is already running in the tab.
-    try {
-        if (action === 'open_ui') {
-            await openUi(tab.id, 1, payload);
-        } else if (action === 'restore_inline_ui') {
-            await restoreInlineUi(tab.id, 1, payload);
-        } else {
-            await toggleUi(tab.id, 1, payload);
-        }
-        hotkeyLog('dispatch_ui_action_fast_path_ok', {
-            tabId: tab.id,
-            action,
-            hotkeyRequestId: payload.hotkeyRequestId || null
-        });
-        return;
-    } catch (firstError) {
-        hotkeyLog('dispatch_ui_action_fast_path_failed', {
-            tabId: tab.id,
-            action,
-            hotkeyRequestId: payload.hotkeyRequestId || null,
-            error: firstError?.message || String(firstError)
-        });
-    }
-
-    await injectContentScript(tab);
-    hotkeyLog('dispatch_ui_action_after_inject', {
-        tabId: tab.id,
-        action,
-        hotkeyRequestId: payload.hotkeyRequestId || null
-    });
-    if (action === 'open_ui') {
-        await openUi(tab.id, 3, payload);
-    } else if (action === 'restore_inline_ui') {
-        await restoreInlineUi(tab.id, 3, payload);
-    } else {
-        await toggleUi(tab.id, 3, payload);
-    }
-    hotkeyLog('dispatch_ui_action_done', {
-        tabId: tab.id,
-        action,
-        hotkeyRequestId: payload.hotkeyRequestId || null
-    });
-}
-
-async function restoreInlineUiForWindow(windowId) {
-    if (!Number.isInteger(windowId)) return false;
-    const activeTab = await getActiveTabForWindow(windowId);
-    if (!activeTab?.id || isRestrictedUrl(activeTab.url || '')) {
-        return false;
-    }
-    await dispatchUiAction(activeTab, 'restore_inline_ui');
-    return true;
 }
 
 if (chrome.sidePanel?.onClosed?.addListener) {
@@ -1002,31 +828,8 @@ if (chrome.sidePanel?.onClosed?.addListener) {
 
         try {
             await setWorkflowForWindow(windowId, null);
-            await restoreInlineUiForWindow(windowId);
         } catch (error) {
-            console.warn('Side panel close restore failed:', error);
+            console.warn('Side panel workflow cleanup failed:', error);
         }
     });
-}
-
-async function injectContentScript(tab) {
-    try {
-        hotkeyLog('inject_content_script_start', { tabId: tab.id });
-        await chrome.scripting.insertCSS({
-            target: { tabId: tab.id },
-            files: ['content.css']
-        });
-        await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            files: ['content.js']
-        });
-        hotkeyLog('inject_content_script_done', { tabId: tab.id });
-    } catch (err) {
-        console.error('Injection failed:', err);
-        hotkeyLog('inject_content_script_failed', {
-            tabId: tab.id,
-            error: err?.message || String(err)
-        });
-        throw err;
-    }
 }

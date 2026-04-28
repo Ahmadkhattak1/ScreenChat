@@ -27,7 +27,7 @@ Generated on: 2026-03-18
 ## 4) Permission Justification
 
 - `activeTab`: temporary access to the current tab after user action (toolbar click or shortcut)
-- `scripting`: injects `content.js` and `content.css` into the active tab on demand
+- `sidePanel`: opens ScreenChat in the browser side panel
 - `storage`: stores local UI/session preferences and cached auth/profile state
 
 ## 5) Privacy Form Notes

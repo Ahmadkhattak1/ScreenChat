@@ -26,7 +26,6 @@
     let responseRequestCounter = 0;
     let hasLocalConversationMutation = false;
     let currentSurfaceWindowId = null;
-    let keepAcrossTabsRequestInFlight = false;
     let keepAcrossTabsState = {
         active: false,
         windowId: null,
@@ -36,6 +35,10 @@
     // User Profile (personal info for personalization)
     let userProfile = null;
     const DEFAULT_WELCOME_MESSAGE = 'How can I help with this page? What would you like to ask about it?';
+    const BUY_ME_A_COFFEE_URL = 'https://buymeacoffee.com/ahmadkhattak';
+    const BUY_ME_A_COFFEE_BUTTON_IMAGE_URL = 'https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png';
+    const SCREENCHAT_SHORTCUT_COMMAND = 'toggle-screenchat';
+    let currentShortcutInfo = null;
 
     // Session State
     let sessionId = createSessionId();
@@ -47,7 +50,73 @@
     const CONVERSATION_HISTORY_KEY = 'conversationHistory';
     const SESSION_STATE_KEY = 'screenchat_session_state';
     const KEEP_ACROSS_TABS_STATE_KEY = 'screenchat_keep_across_tabs_v1';
-    const DEFAULT_OPEN_STYLE_KEY = 'screenchat_default_open_style_v1';
+    const OPENAI_API_KEY_STORAGE_KEY = 'screenchat_openai_api_key_v1';
+    const ANTHROPIC_API_KEY_STORAGE_KEY = 'screenchat_anthropic_api_key_v1';
+    const GEMINI_API_KEY_STORAGE_KEY = 'screenchat_gemini_api_key_v1';
+    const NVIDIA_API_KEY_STORAGE_KEY = 'screenchat_nvidia_api_key_v1';
+    const OPENROUTER_API_KEY_STORAGE_KEY = 'screenchat_openrouter_api_key_v1';
+    const AI_PROVIDER_STORAGE_KEY = 'screenchat_ai_provider_v1';
+    const OPENAI_MODEL_STORAGE_KEY = 'screenchat_openai_model_v1';
+    const ANTHROPIC_MODEL_STORAGE_KEY = 'screenchat_anthropic_model_v1';
+    const GEMINI_MODEL_STORAGE_KEY = 'screenchat_gemini_model_v1';
+    const NVIDIA_MODEL_STORAGE_KEY = 'screenchat_nvidia_model_v1';
+    const OPENROUTER_MODEL_STORAGE_KEY = 'screenchat_openrouter_model_v1';
+    const AI_PROVIDER_OPTIONS = [
+        { id: 'openai', label: 'OpenAI' },
+        { id: 'anthropic', label: 'Anthropic' },
+        { id: 'gemini', label: 'Gemini' },
+        { id: 'nvidia', label: 'NVIDIA NIM' },
+        { id: 'openrouter', label: 'OpenRouter' }
+    ];
+    const OPENAI_MODEL_OPTIONS = [
+        { id: 'gpt-5.5', label: 'GPT-5.5' },
+        { id: 'gpt-5.4', label: 'GPT-5.4' },
+        { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini' },
+        { id: 'gpt-5.4-nano', label: 'GPT-5.4 Nano' },
+        { id: 'gpt-5.3-chat-latest', label: 'GPT-5.3 Chat' },
+        { id: 'gpt-5.2-chat-latest', label: 'GPT-5.2 Chat' },
+        { id: 'gpt-5-mini', label: 'GPT-5 Mini' },
+        { id: 'gpt-5-nano', label: 'GPT-5 Nano' }
+    ];
+    const ANTHROPIC_MODEL_OPTIONS = [
+        { id: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
+        { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
+        { id: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5' },
+        { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' },
+        { id: 'claude-3-7-sonnet-latest', label: 'Claude Sonnet 3.7' },
+        { id: 'claude-3-5-haiku-latest', label: 'Claude Haiku 3.5' }
+    ];
+    const GEMINI_MODEL_OPTIONS = [
+        { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
+        { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
+        { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash-Lite' }
+    ];
+    const NVIDIA_MODEL_OPTIONS = [
+        { id: 'openai/gpt-oss-120b', label: 'GPT OSS 120B' },
+        { id: 'openai/gpt-oss-20b', label: 'GPT OSS 20B' },
+        { id: 'meta/llama-3.3-70b-instruct', label: 'Llama 3.3 70B Instruct' },
+        { id: 'mistralai/mistral-medium-3-instruct', label: 'Mistral Medium 3 Instruct' },
+        { id: 'mistralai/mistral-small-24b-instruct', label: 'Mistral Small 24B Instruct' }
+    ];
+    const OPENROUTER_MODEL_OPTIONS = [
+        { id: 'openai/gpt-5.5', label: 'GPT-5.5' },
+        { id: 'openai/gpt-5', label: 'GPT-5' },
+        { id: 'anthropic/claude-sonnet-4', label: 'Claude Sonnet 4' },
+        { id: 'google/gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
+        { id: 'meta-llama/llama-3.3-70b-instruct', label: 'Llama 3.3 70B Instruct' }
+    ];
+    const DEFAULT_AI_PROVIDER = 'openai';
+    const DEFAULT_OPENAI_CHAT_MODEL = 'gpt-5.4-mini';
+    const DEFAULT_ANTHROPIC_CHAT_MODEL = 'claude-sonnet-4-6';
+    const DEFAULT_GEMINI_CHAT_MODEL = 'gemini-2.5-flash';
+    const DEFAULT_NVIDIA_CHAT_MODEL = 'openai/gpt-oss-20b';
+    const DEFAULT_OPENROUTER_CHAT_MODEL = 'openai/gpt-5';
+    const OPENAI_RESPONSES_API_URL = 'https://api.openai.com/v1/responses';
+    const ANTHROPIC_MESSAGES_API_URL = 'https://api.anthropic.com/v1/messages';
+    const GEMINI_STREAM_GENERATE_CONTENT_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
+    const NVIDIA_CHAT_COMPLETIONS_API_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
+    const OPENROUTER_CHAT_COMPLETIONS_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
+    const ANTHROPIC_API_VERSION = '2023-06-01';
     const LEGACY_SESSION_DOMAIN_KEY = 'sessionDomain';
     const PROFILE_CACHE_KEY = 'screenchat_profile_identity';
     const PROFILE_LOCAL_STORAGE_KEY = 'screenchat_profile_identity';
@@ -56,7 +125,18 @@
     let isAuthSessionVerified = false;
     let isAuthRestoreInFlight = false;
     let attachScreenEnabled = true;
-    let preferredOpenStyle = 'window';
+    let localOpenAiApiKey = '';
+    let localAnthropicApiKey = '';
+    let localGeminiApiKey = '';
+    let localNvidiaApiKey = '';
+    let localOpenrouterApiKey = '';
+    let selectedAiProvider = DEFAULT_AI_PROVIDER;
+    let selectedProfileProvider = null;
+    let selectedOpenAiModel = DEFAULT_OPENAI_CHAT_MODEL;
+    let selectedAnthropicModel = DEFAULT_ANTHROPIC_CHAT_MODEL;
+    let selectedGeminiModel = DEFAULT_GEMINI_CHAT_MODEL;
+    let selectedNvidiaModel = DEFAULT_NVIDIA_CHAT_MODEL;
+    let selectedOpenrouterModel = DEFAULT_OPENROUTER_CHAT_MODEL;
     let attachGlowResetTimeout = 0;
     const API_BASE_CACHE_KEY = 'screenchat_api_base_url';
     const API_BASE_OVERRIDE_KEY = 'screenchat_api_base_override';
@@ -498,26 +578,16 @@
             : '';
     }
 
-    function getAccountEmail() {
-        if (!isAuthenticated()) return '';
-        return isNonEmptyString(authSession?.user?.email)
-            ? authSession.user.email.trim()
-            : '';
-    }
-
     function normalizeProfileIdentity(rawIdentity) {
         if (!rawIdentity || typeof rawIdentity !== 'object' || Array.isArray(rawIdentity)) return null;
 
         const fullName = isNonEmptyString(rawIdentity.fullName)
             ? rawIdentity.fullName.trim()
             : '';
-        const email = isNonEmptyString(rawIdentity.email)
-            ? rawIdentity.email.trim()
-            : '';
 
-        if (!fullName && !email) return null;
+        if (!fullName) return null;
 
-        return { fullName, email };
+        return { fullName };
     }
 
     function readProfileIdentityFromLocalStorage() {
@@ -557,31 +627,1019 @@
         return identity;
     }
 
+    function normalizeOpenAiApiKey(rawValue) {
+        return isNonEmptyString(rawValue) ? rawValue.trim() : '';
+    }
+
+    function normalizeAnthropicApiKey(rawValue) {
+        return isNonEmptyString(rawValue) ? rawValue.trim() : '';
+    }
+
+    function normalizeGeminiApiKey(rawValue) {
+        return isNonEmptyString(rawValue) ? rawValue.trim() : '';
+    }
+
+    function normalizeNvidiaApiKey(rawValue) {
+        return isNonEmptyString(rawValue) ? rawValue.trim() : '';
+    }
+
+    function normalizeOpenrouterApiKey(rawValue) {
+        return isNonEmptyString(rawValue) ? rawValue.trim() : '';
+    }
+
+    function normalizeAiProvider(rawValue) {
+        const normalizedValue = isNonEmptyString(rawValue) ? rawValue.trim().toLowerCase() : '';
+        return AI_PROVIDER_OPTIONS.some((option) => option.id === normalizedValue)
+            ? normalizedValue
+            : DEFAULT_AI_PROVIDER;
+    }
+
+    function getAiProviderLabel(provider = selectedAiProvider) {
+        const normalizedProvider = normalizeAiProvider(provider);
+        return AI_PROVIDER_OPTIONS.find((option) => option.id === normalizedProvider)?.label || 'OpenAI';
+    }
+
+    function getModelOptionsForProvider(provider = selectedAiProvider) {
+        switch (normalizeAiProvider(provider)) {
+        case 'anthropic':
+            return ANTHROPIC_MODEL_OPTIONS;
+        case 'gemini':
+            return GEMINI_MODEL_OPTIONS;
+        case 'nvidia':
+            return NVIDIA_MODEL_OPTIONS;
+        case 'openrouter':
+            return OPENROUTER_MODEL_OPTIONS;
+        default:
+            return OPENAI_MODEL_OPTIONS;
+        }
+    }
+
+    function normalizeOpenAiModel(rawValue) {
+        const normalizedValue = isNonEmptyString(rawValue) ? rawValue.trim() : '';
+        return OPENAI_MODEL_OPTIONS.some((option) => option.id === normalizedValue)
+            ? normalizedValue
+            : DEFAULT_OPENAI_CHAT_MODEL;
+    }
+
+    function normalizeAnthropicModel(rawValue) {
+        const normalizedValue = isNonEmptyString(rawValue) ? rawValue.trim() : '';
+        return ANTHROPIC_MODEL_OPTIONS.some((option) => option.id === normalizedValue)
+            ? normalizedValue
+            : DEFAULT_ANTHROPIC_CHAT_MODEL;
+    }
+
+    function normalizeGeminiModel(rawValue) {
+        const normalizedValue = isNonEmptyString(rawValue) ? rawValue.trim() : '';
+        return GEMINI_MODEL_OPTIONS.some((option) => option.id === normalizedValue)
+            ? normalizedValue
+            : DEFAULT_GEMINI_CHAT_MODEL;
+    }
+
+    function normalizeNvidiaModel(rawValue) {
+        const normalizedValue = isNonEmptyString(rawValue) ? rawValue.trim() : '';
+        return NVIDIA_MODEL_OPTIONS.some((option) => option.id === normalizedValue)
+            ? normalizedValue
+            : DEFAULT_NVIDIA_CHAT_MODEL;
+    }
+
+    function normalizeOpenrouterModel(rawValue) {
+        const normalizedValue = isNonEmptyString(rawValue) ? rawValue.trim() : '';
+        return OPENROUTER_MODEL_OPTIONS.some((option) => option.id === normalizedValue)
+            ? normalizedValue
+            : DEFAULT_OPENROUTER_CHAT_MODEL;
+    }
+
+    function normalizeModelForProvider(provider, rawValue) {
+        switch (normalizeAiProvider(provider)) {
+        case 'anthropic':
+            return normalizeAnthropicModel(rawValue);
+        case 'gemini':
+            return normalizeGeminiModel(rawValue);
+        case 'nvidia':
+            return normalizeNvidiaModel(rawValue);
+        case 'openrouter':
+            return normalizeOpenrouterModel(rawValue);
+        default:
+            return normalizeOpenAiModel(rawValue);
+        }
+    }
+
+    function getSelectedModelForProvider(provider = selectedAiProvider) {
+        switch (normalizeAiProvider(provider)) {
+        case 'anthropic':
+            return selectedAnthropicModel;
+        case 'gemini':
+            return selectedGeminiModel;
+        case 'nvidia':
+            return selectedNvidiaModel;
+        case 'openrouter':
+            return selectedOpenrouterModel;
+        default:
+            return selectedOpenAiModel;
+        }
+    }
+
+    function getSelectedApiKeyForProvider(provider = selectedAiProvider) {
+        switch (normalizeAiProvider(provider)) {
+        case 'anthropic':
+            return normalizeAnthropicApiKey(localAnthropicApiKey);
+        case 'gemini':
+            return normalizeGeminiApiKey(localGeminiApiKey);
+        case 'nvidia':
+            return normalizeNvidiaApiKey(localNvidiaApiKey);
+        case 'openrouter':
+            return normalizeOpenrouterApiKey(localOpenrouterApiKey);
+        default:
+            return normalizeOpenAiApiKey(localOpenAiApiKey);
+        }
+    }
+
+    function hasApiKeyForProvider(provider = selectedAiProvider) {
+        return !!getSelectedApiKeyForProvider(provider);
+    }
+
+    function getProviderApiKeyPlaceholder(provider = selectedAiProvider) {
+        switch (normalizeAiProvider(provider)) {
+        case 'anthropic':
+            return 'sk-ant-...';
+        case 'gemini':
+            return 'Gemini API key';
+        case 'nvidia':
+            return 'NVIDIA NIM API key';
+        case 'openrouter':
+            return 'OpenRouter API key';
+        default:
+            return 'sk-...';
+        }
+    }
+
+    function getApiKeyStorageKeyForProvider(provider = selectedAiProvider) {
+        switch (normalizeAiProvider(provider)) {
+        case 'anthropic':
+            return ANTHROPIC_API_KEY_STORAGE_KEY;
+        case 'gemini':
+            return GEMINI_API_KEY_STORAGE_KEY;
+        case 'nvidia':
+            return NVIDIA_API_KEY_STORAGE_KEY;
+        case 'openrouter':
+            return OPENROUTER_API_KEY_STORAGE_KEY;
+        default:
+            return OPENAI_API_KEY_STORAGE_KEY;
+        }
+    }
+
+    function getModelStorageKeyForProvider(provider = selectedAiProvider) {
+        switch (normalizeAiProvider(provider)) {
+        case 'anthropic':
+            return ANTHROPIC_MODEL_STORAGE_KEY;
+        case 'gemini':
+            return GEMINI_MODEL_STORAGE_KEY;
+        case 'nvidia':
+            return NVIDIA_MODEL_STORAGE_KEY;
+        case 'openrouter':
+            return OPENROUTER_MODEL_STORAGE_KEY;
+        default:
+            return OPENAI_MODEL_STORAGE_KEY;
+        }
+    }
+
+    function setLocalApiKeyForProvider(provider, value) {
+        switch (normalizeAiProvider(provider)) {
+        case 'anthropic':
+            localAnthropicApiKey = value;
+            break;
+        case 'gemini':
+            localGeminiApiKey = value;
+            break;
+        case 'nvidia':
+            localNvidiaApiKey = value;
+            break;
+        case 'openrouter':
+            localOpenrouterApiKey = value;
+            break;
+        default:
+            localOpenAiApiKey = value;
+            break;
+        }
+    }
+
+    function setSelectedModelForProvider(provider, value) {
+        switch (normalizeAiProvider(provider)) {
+        case 'anthropic':
+            selectedAnthropicModel = value;
+            break;
+        case 'gemini':
+            selectedGeminiModel = value;
+            break;
+        case 'nvidia':
+            selectedNvidiaModel = value;
+            break;
+        case 'openrouter':
+            selectedOpenrouterModel = value;
+            break;
+        default:
+            selectedOpenAiModel = value;
+            break;
+        }
+    }
+
+    function getProviderKeyHelpCopy(provider = selectedAiProvider) {
+        return `Saved only in this browser. ScreenChat sends it directly to ${getAiProviderLabel(provider)} and does not save it on our servers.`;
+    }
+
+    function getConfiguredProviders() {
+        return AI_PROVIDER_OPTIONS
+            .map((option) => option.id)
+            .filter((provider) => hasApiKeyForProvider(provider));
+    }
+
+    function hasAnyConfiguredProvider() {
+        return getConfiguredProviders().length > 0;
+    }
+
+    function shouldShowChatSetupState() {
+        return isAuthenticated() && !hasAnyConfiguredProvider();
+    }
+
+    function syncActiveProviderState({ persist = false } = {}) {
+        const configuredProviders = getConfiguredProviders();
+        const currentProvider = normalizeAiProvider(selectedAiProvider);
+        let nextProvider = currentProvider;
+
+        if (configuredProviders.length === 1) {
+            nextProvider = configuredProviders[0];
+        } else if (configuredProviders.length > 1 && !configuredProviders.includes(currentProvider)) {
+            nextProvider = configuredProviders[0];
+        } else if (!configuredProviders.length) {
+            nextProvider = currentProvider || DEFAULT_AI_PROVIDER;
+        }
+
+        if (nextProvider !== selectedAiProvider) {
+            selectedAiProvider = nextProvider;
+            if (persist) {
+                storageSetSafe({ [AI_PROVIDER_STORAGE_KEY]: nextProvider });
+            }
+        }
+
+        return selectedAiProvider;
+    }
+
+    function normalizeApiKeyForProvider(provider, rawValue) {
+        switch (normalizeAiProvider(provider)) {
+        case 'anthropic':
+            return normalizeAnthropicApiKey(rawValue);
+        case 'gemini':
+            return normalizeGeminiApiKey(rawValue);
+        case 'nvidia':
+            return normalizeNvidiaApiKey(rawValue);
+        case 'openrouter':
+            return normalizeOpenrouterApiKey(rawValue);
+        default:
+            return normalizeOpenAiApiKey(rawValue);
+        }
+    }
+
+    function applyStoredApiKeyForProvider(provider, keyInput, rawValue) {
+        const normalizedProvider = normalizeAiProvider(provider);
+        const normalizedKey = normalizeApiKeyForProvider(normalizedProvider, rawValue);
+        setLocalApiKeyForProvider(normalizedProvider, normalizedKey);
+        syncActiveProviderState();
+        if (keyInput) {
+            keyInput.value = '';
+        }
+        syncAiProviderSelectUi();
+        syncChatToolbarUi();
+        syncProfileApiKeySettingsUi();
+        syncInlineApiKeyPrompt();
+        return normalizedKey;
+    }
+
+    function persistLocalApiKeyForProvider(provider, rawValue) {
+        const normalizedProvider = normalizeAiProvider(provider);
+        const normalizedKey = normalizeApiKeyForProvider(normalizedProvider, rawValue);
+        if (!normalizedKey) {
+            syncProfileApiKeySettingsUi();
+            syncInlineApiKeyPrompt();
+            return getSelectedApiKeyForProvider(normalizedProvider);
+        }
+
+        setLocalApiKeyForProvider(normalizedProvider, normalizedKey);
+        syncActiveProviderState({ persist: true });
+
+        const providerKeyInput = shadowRoot?.getElementById('sc-profile-provider-key');
+        if (providerKeyInput instanceof HTMLInputElement && normalizeAiProvider(selectedAiProvider) === normalizedProvider) {
+            providerKeyInput.value = '';
+        }
+
+        const storageKey = getApiKeyStorageKeyForProvider(normalizedProvider);
+        storageSetSafe({ [storageKey]: normalizedKey });
+
+        syncAiProviderSelectUi();
+        syncChatToolbarUi();
+        syncProfileApiKeySettingsUi();
+        syncInlineApiKeyPrompt();
+        return normalizedKey;
+    }
+
+    function renderAiProviderPills(groupIdPrefix, selectedProvider = selectedAiProvider) {
+        const normalizedProvider = normalizeAiProvider(selectedProvider);
+        return AI_PROVIDER_OPTIONS.map((option) => {
+            const isSelected = option.id === normalizedProvider;
+            const hasStoredKey = hasApiKeyForProvider(option.id);
+            return `<button class="sc-provider-pill${isSelected ? ' selected' : ''}${hasStoredKey ? ' has-key' : ''}" id="${groupIdPrefix}-${option.id}" type="button" data-provider-id="${option.id}" aria-pressed="${isSelected ? 'true' : 'false'}" aria-label="${option.label}${hasStoredKey ? ' connected' : ''}">${hasStoredKey ? '<span class="sc-provider-pill-check" aria-hidden="true">✓</span>' : ''}<span class="sc-provider-pill-label">${option.label}</span></button>`;
+        }).join('');
+    }
+
+    function renderChatModelOptions(provider = selectedAiProvider, selectedModel = getSelectedModelForProvider(provider)) {
+        const normalizedProvider = normalizeAiProvider(provider);
+        const normalizedModel = normalizeModelForProvider(normalizedProvider, selectedModel);
+        return getModelOptionsForProvider(normalizedProvider).map((option) => (
+            `<option value="${option.id}"${option.id === normalizedModel ? ' selected' : ''}>${option.label}</option>`
+        )).join('');
+    }
+
+    function renderChatModelMenuOptions(provider = selectedAiProvider, selectedModel = getSelectedModelForProvider(provider)) {
+        const normalizedProvider = normalizeAiProvider(provider);
+        const normalizedModel = normalizeModelForProvider(normalizedProvider, selectedModel);
+        return getModelOptionsForProvider(normalizedProvider).map((option) => {
+            const isSelected = option.id === normalizedModel;
+            return `<button class="sc-model-option${isSelected ? ' selected' : ''}" id="sc-model-option-${option.id}" type="button" role="option" data-model-id="${option.id}" aria-selected="${isSelected ? 'true' : 'false'}">${option.label}</button>`;
+        }).join('');
+    }
+
+    function syncAiProviderSelectUi() {
+        const inlineProviderPillList = shadowRoot?.getElementById('sc-inline-provider-pill-list');
+        if (inlineProviderPillList instanceof HTMLElement) {
+            inlineProviderPillList.innerHTML = renderAiProviderPills('sc-inline-provider', selectedAiProvider);
+        }
+    }
+
+    function syncChatModelSelectUi() {
+        const modelButton = shadowRoot?.getElementById('sc-chat-model-trigger');
+        const modelMenu = shadowRoot?.getElementById('sc-chat-model-menu');
+        const selectedModel = getSelectedModelForProvider(selectedAiProvider);
+        const selectedLabel = getModelOptionsForProvider(selectedAiProvider)
+            .find((option) => option.id === selectedModel)?.label || selectedModel;
+
+        if (modelButton instanceof HTMLButtonElement) {
+            modelButton.querySelector('.sc-model-picker-value')?.replaceChildren(document.createTextNode(selectedLabel));
+        }
+        if (modelMenu instanceof HTMLElement) {
+            modelMenu.innerHTML = renderChatModelMenuOptions(selectedAiProvider, selectedModel);
+        }
+    }
+
+    function syncChatToolbarUi() {
+        const toolbar = shadowRoot?.getElementById('sc-chat-toolbar');
+        const modelPicker = shadowRoot?.getElementById('sc-chat-model-picker');
+        const configuredProviders = getConfiguredProviders();
+        const hasProvider = configuredProviders.length > 0;
+
+        if (toolbar instanceof HTMLElement) {
+            toolbar.hidden = !hasProvider;
+        }
+        if (modelPicker instanceof HTMLElement) {
+            modelPicker.hidden = !hasProvider;
+        }
+    }
+
+    function syncProfileApiKeySettingsUi() {
+        const profileKeyLabel = shadowRoot?.getElementById('sc-profile-provider-key-label');
+        const profileKeyHelp = shadowRoot?.getElementById('sc-profile-provider-key-help');
+        const profileKeyInput = shadowRoot?.getElementById('sc-profile-provider-key');
+        const profileProviderPillList = shadowRoot?.getElementById('sc-profile-provider-pill-list');
+        const provider = normalizeAiProvider(selectedProfileProvider || selectedAiProvider);
+
+        if (profileKeyLabel) {
+            profileKeyLabel.textContent = `${getAiProviderLabel(provider)} API Key`;
+        }
+        if (profileKeyHelp) {
+            profileKeyHelp.textContent = getProviderKeyHelpCopy(provider);
+        }
+        if (profileKeyInput instanceof HTMLInputElement) {
+            profileKeyInput.value = '';
+            profileKeyInput.placeholder = hasApiKeyForProvider(provider)
+                ? 'Saved locally - enter a new key to replace'
+                : getProviderApiKeyPlaceholder(provider);
+            profileKeyInput.setAttribute('aria-label', `${getAiProviderLabel(provider)} API Key`);
+        }
+        if (profileProviderPillList instanceof HTMLElement) {
+            profileProviderPillList.innerHTML = renderAiProviderPills('sc-profile-provider', provider);
+        }
+    }
+
+    function enableHorizontalDragScroll(scroller) {
+        if (!(scroller instanceof HTMLElement) || scroller.dataset.scDragScrollReady === 'true') return;
+        scroller.dataset.scDragScrollReady = 'true';
+
+        const DRAG_THRESHOLD_PX = 10;
+        const CLICK_SUPPRESSION_MS = 180;
+        let pointerId = null;
+        let startX = 0;
+        let startY = 0;
+        let startScrollLeft = 0;
+        let isDragging = false;
+        let hasPointerCapture = false;
+        let suppressClickUntil = 0;
+
+        const stopDragging = () => {
+            if (isDragging) {
+                suppressClickUntil = Date.now() + CLICK_SUPPRESSION_MS;
+            }
+            if (hasPointerCapture && pointerId !== null) {
+                try {
+                    scroller.releasePointerCapture(pointerId);
+                } catch {
+                    // No-op.
+                }
+            }
+            pointerId = null;
+            isDragging = false;
+            hasPointerCapture = false;
+            scroller.classList.remove('is-dragging');
+        };
+
+        scroller.addEventListener('pointerdown', (event) => {
+            if (event.pointerType === 'mouse' && event.button !== 0) return;
+            pointerId = event.pointerId;
+            startX = event.clientX;
+            startY = event.clientY;
+            startScrollLeft = scroller.scrollLeft;
+            isDragging = false;
+            hasPointerCapture = false;
+        });
+
+        scroller.addEventListener('pointermove', (event) => {
+            if (pointerId !== event.pointerId) return;
+            const deltaX = event.clientX - startX;
+            const deltaY = event.clientY - startY;
+            if (!isDragging) {
+                if (Math.abs(deltaX) < DRAG_THRESHOLD_PX) return;
+                if (Math.abs(deltaX) <= Math.abs(deltaY)) {
+                    stopDragging();
+                    return;
+                }
+            }
+            if (!hasPointerCapture) {
+                try {
+                    scroller.setPointerCapture(pointerId);
+                    hasPointerCapture = true;
+                } catch {
+                    hasPointerCapture = false;
+                }
+            }
+            isDragging = true;
+            scroller.classList.add('is-dragging');
+            scroller.scrollLeft = startScrollLeft - deltaX;
+            event.preventDefault();
+        });
+
+        scroller.addEventListener('click', (event) => {
+            if (Date.now() < suppressClickUntil) {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+        }, true);
+
+        scroller.addEventListener('selectstart', (event) => {
+            event.preventDefault();
+        });
+
+        scroller.addEventListener('dragstart', (event) => {
+            event.preventDefault();
+        });
+
+        scroller.addEventListener('pointerup', (event) => {
+            if (pointerId !== event.pointerId) return;
+            stopDragging();
+        });
+
+        scroller.addEventListener('pointercancel', (event) => {
+            if (pointerId !== event.pointerId) return;
+            stopDragging();
+        });
+
+        scroller.addEventListener('lostpointercapture', stopDragging);
+    }
+
+    function applyStoredAiProvider(rawValue) {
+        selectedAiProvider = normalizeAiProvider(rawValue);
+        syncActiveProviderState();
+        syncAiProviderSelectUi();
+        syncChatModelSelectUi();
+        syncChatToolbarUi();
+        syncProfileApiKeySettingsUi();
+        syncInlineApiKeyPrompt();
+        return selectedAiProvider;
+    }
+
+    function persistLocalAiProvider(rawValue) {
+        const normalizedProvider = normalizeAiProvider(rawValue);
+        selectedAiProvider = normalizedProvider;
+        syncActiveProviderState();
+        syncAiProviderSelectUi();
+        syncChatModelSelectUi();
+        syncChatToolbarUi();
+        syncProfileApiKeySettingsUi();
+        syncInlineApiKeyPrompt();
+        storageSetSafe({ [AI_PROVIDER_STORAGE_KEY]: selectedAiProvider });
+        return selectedAiProvider;
+    }
+
+    function applyStoredModelForProvider(provider, rawValue) {
+        const normalizedProvider = normalizeAiProvider(provider);
+        const normalizedModel = normalizeModelForProvider(normalizedProvider, rawValue);
+        setSelectedModelForProvider(normalizedProvider, normalizedModel);
+        if (selectedAiProvider === normalizedProvider) {
+            syncChatModelSelectUi();
+        }
+        return normalizedModel;
+    }
+
+    function persistLocalModelForProvider(provider, rawValue) {
+        const normalizedProvider = normalizeAiProvider(provider);
+        const normalizedModel = normalizeModelForProvider(normalizedProvider, rawValue);
+        setSelectedModelForProvider(normalizedProvider, normalizedModel);
+        if (selectedAiProvider === normalizedProvider) {
+            syncChatModelSelectUi();
+        }
+        storageSetSafe({ [getModelStorageKeyForProvider(normalizedProvider)]: normalizedModel });
+        return normalizedModel;
+    }
+
+    function resolveProfileIdentity(profileData = {}) {
+        const source = profileData && typeof profileData === 'object' && !Array.isArray(profileData)
+            ? profileData
+            : {};
+        const fullName = isNonEmptyString(source.fullName) ? source.fullName.trim() : '';
+        const firstName = fullName ? fullName.split(/\s+/)[0] : '';
+
+        return {
+            firstName,
+            fullName
+        };
+    }
+
+    function buildUserProfileContext(profileData = {}) {
+        const identity = resolveProfileIdentity(profileData);
+        const profileParts = [];
+
+        if (identity.firstName) profileParts.push(`First Name: ${identity.firstName}`);
+        if (identity.fullName) profileParts.push(`Full Name: ${identity.fullName}`);
+
+        if (!profileParts.length) {
+            return '';
+        }
+
+        return `\n[USER PROFILE]\n${profileParts.join('\n')}\nUse this info to personalize responses and auto-fill forms when relevant. If it feels natural, you may address the user by their first name, but do not overuse it.\n`;
+    }
+
+    function buildDefaultChatSystemPrompt({ hasScreenshot, effectiveProfile }) {
+        const profileContext = effectiveProfile ? buildUserProfileContext(effectiveProfile) : '';
+        const visualContextRule = hasScreenshot
+            ? 'A screenshot is attached. Use only that visual context plus the conversation.'
+            : 'No screenshot is attached. Rely only on the conversation.';
+
+        return `You are ScreenChat, a helpful assistant for understanding webpages.
+
+${visualContextRule}
+${profileContext}
+
+Your role:
+1. Answer questions directly and accurately using only the conversation and any attached screenshot
+2. Provide explanations, tutorials, and concise guidance about the content
+3. Be straight to the point and avoid technical jargon unless the user asks for it
+4. Keep answers scoped to what the user actually asked; for simple questions, answer the question first and do not volunteer extra steps, alternatives, or follow-up advice unless needed for correctness
+5. Describe anything visual in natural language, not HTML, DOM structure, or source code
+6. If user profile context is available, you may refer to the user by their first name when natural and useful
+7. Speak in natural spoken language and avoid using em dashes
+
+IMPORTANT RULES:
+- Treat requests for advice, recommendations, next steps, drafting a reply, or which on-screen option the user should choose as normal questions and answer them directly
+- Only mention that ScreenChat cannot take actions on the page when the user explicitly asks ScreenChat itself to click, fill, submit, navigate, or otherwise perform the action for them
+- When the user wants help completing something on the page, prefer direct guidance such as what to click, what to type, or what to do next
+- If a screenshot is not attached and the user request depends on seeing the screen, instruct the user to click the + button inside the message field so the screen can be attached
+- If the user asks a narrow question, give a narrow answer. Do not automatically add a list of next steps or broader strategy unless the user asks for that
+- You do not have real-time data beyond the conversation and any attached screenshot
+
+Respond naturally as a helpful assistant. No JSON format - just conversational text.`;
+    }
+
+    function buildOpenAiInput(messages = [], image) {
+        const normalizedMessages = Array.isArray(messages)
+            ? messages
+                .filter((message) => (message?.role === 'user' || message?.role === 'assistant') && isNonEmptyString(message?.content))
+                .map((message) => ({
+                    role: message.role === 'assistant' ? 'assistant' : 'user',
+                    content: message.content.trim()
+                }))
+            : [];
+        const imageUrl = isNonEmptyString(image) ? image.trim() : '';
+
+        let lastUserIndex = -1;
+        for (let i = normalizedMessages.length - 1; i >= 0; i -= 1) {
+            if (normalizedMessages[i].role === 'user') {
+                lastUserIndex = i;
+                break;
+            }
+        }
+
+        const input = normalizedMessages.map((message, index) => {
+            if (imageUrl && index === lastUserIndex) {
+                return {
+                    role: 'user',
+                    content: [
+                        { type: 'input_text', text: message.content },
+                        { type: 'input_image', image_url: imageUrl }
+                    ]
+                };
+            }
+            return message;
+        });
+
+        if (imageUrl && lastUserIndex === -1) {
+            input.push({
+                role: 'user',
+                content: [
+                    { type: 'input_text', text: 'Use the attached screenshot as additional context.' },
+                    { type: 'input_image', image_url: imageUrl }
+                ]
+            });
+        }
+
+        return input;
+    }
+
+    function buildOpenAiResponsesRequest(payload = {}) {
+        const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+        const image = isNonEmptyString(payload?.image) ? payload.image.trim() : '';
+        const effectiveProfile = payload?.profile && typeof payload.profile === 'object' && !Array.isArray(payload.profile)
+            ? payload.profile
+            : null;
+        const selectedModel = normalizeOpenAiModel(payload?.model || selectedOpenAiModel);
+
+        return {
+            model: selectedModel,
+            instructions: buildDefaultChatSystemPrompt({ hasScreenshot: Boolean(image), effectiveProfile }),
+            input: buildOpenAiInput(messages, image),
+            max_output_tokens: 2048,
+            stream: true,
+            store: false
+        };
+    }
+
+    function buildOpenAiCompatibleChatMessages(messages = [], image, effectiveProfile = null) {
+        const normalizedMessages = Array.isArray(messages)
+            ? messages
+                .filter((message) => (message?.role === 'user' || message?.role === 'assistant') && isNonEmptyString(message?.content))
+                .map((message) => ({
+                    role: message.role === 'assistant' ? 'assistant' : 'user',
+                    content: message.content.trim()
+                }))
+            : [];
+        const imageUrl = isNonEmptyString(image) ? image.trim() : '';
+
+        let lastUserIndex = -1;
+        for (let i = normalizedMessages.length - 1; i >= 0; i -= 1) {
+            if (normalizedMessages[i].role === 'user') {
+                lastUserIndex = i;
+                break;
+            }
+        }
+
+        const chatMessages = normalizedMessages.map((message, index) => {
+            if (imageUrl && index === lastUserIndex) {
+                return {
+                    role: 'user',
+                    content: [
+                        { type: 'text', text: message.content },
+                        { type: 'image_url', image_url: { url: imageUrl } }
+                    ]
+                };
+            }
+            return message;
+        });
+
+        if (imageUrl && lastUserIndex === -1) {
+            chatMessages.push({
+                role: 'user',
+                content: [
+                    { type: 'text', text: 'Use the attached screenshot as additional context.' },
+                    { type: 'image_url', image_url: { url: imageUrl } }
+                ]
+            });
+        }
+
+        return [
+            {
+                role: 'system',
+                content: buildDefaultChatSystemPrompt({ hasScreenshot: Boolean(imageUrl), effectiveProfile })
+            },
+            ...chatMessages
+        ];
+    }
+
+    function buildGeminiInlineDataPart(image) {
+        const normalizedImage = isNonEmptyString(image) ? image.trim() : '';
+        if (!normalizedImage) return null;
+
+        const dataUrlMatch = normalizedImage.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/i);
+        if (!dataUrlMatch) return null;
+
+        return {
+            inline_data: {
+                mime_type: dataUrlMatch[1],
+                data: dataUrlMatch[2]
+            }
+        };
+    }
+
+    function buildGeminiContents(messages = [], image) {
+        const normalizedMessages = Array.isArray(messages)
+            ? messages
+                .filter((message) => (message?.role === 'user' || message?.role === 'assistant') && isNonEmptyString(message?.content))
+                .map((message) => ({
+                    role: message.role === 'assistant' ? 'model' : 'user',
+                    parts: [{ text: message.content.trim() }]
+                }))
+            : [];
+        const imagePart = buildGeminiInlineDataPart(image);
+
+        let lastUserIndex = -1;
+        for (let i = normalizedMessages.length - 1; i >= 0; i -= 1) {
+            if (normalizedMessages[i].role === 'user') {
+                lastUserIndex = i;
+                break;
+            }
+        }
+
+        if (imagePart && lastUserIndex >= 0) {
+            normalizedMessages[lastUserIndex] = {
+                role: 'user',
+                parts: [
+                    ...normalizedMessages[lastUserIndex].parts,
+                    imagePart
+                ]
+            };
+        } else if (imagePart) {
+            normalizedMessages.push({
+                role: 'user',
+                parts: [
+                    { text: 'Use the attached screenshot as additional context.' },
+                    imagePart
+                ]
+            });
+        }
+
+        return normalizedMessages;
+    }
+
+    function buildGeminiGenerateContentRequest(payload = {}) {
+        const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+        const image = isNonEmptyString(payload?.image) ? payload.image.trim() : '';
+        const effectiveProfile = payload?.profile && typeof payload.profile === 'object' && !Array.isArray(payload.profile)
+            ? payload.profile
+            : null;
+        const selectedModel = normalizeGeminiModel(payload?.model || selectedGeminiModel);
+
+        return {
+            model: selectedModel,
+            requestUrl: `${GEMINI_STREAM_GENERATE_CONTENT_URL}/${encodeURIComponent(selectedModel)}:streamGenerateContent?alt=sse`,
+            body: {
+                systemInstruction: {
+                    parts: [
+                        {
+                            text: buildDefaultChatSystemPrompt({ hasScreenshot: Boolean(image), effectiveProfile })
+                        }
+                    ]
+                },
+                contents: buildGeminiContents(messages, image),
+                generationConfig: {
+                    maxOutputTokens: 2048
+                }
+            }
+        };
+    }
+
+    function buildAnthropicImageContentBlock(image) {
+        const normalizedImage = isNonEmptyString(image) ? image.trim() : '';
+        if (!normalizedImage) return null;
+
+        const dataUrlMatch = normalizedImage.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/i);
+        if (dataUrlMatch) {
+            return {
+                type: 'image',
+                source: {
+                    type: 'base64',
+                    media_type: dataUrlMatch[1],
+                    data: dataUrlMatch[2]
+                }
+            };
+        }
+
+        if (/^https?:\/\//i.test(normalizedImage)) {
+            return {
+                type: 'image',
+                source: {
+                    type: 'url',
+                    url: normalizedImage
+                }
+            };
+        }
+
+        return null;
+    }
+
+    function buildAnthropicMessagesInput(messages = [], image) {
+        const normalizedMessages = Array.isArray(messages)
+            ? messages
+                .filter((message) => (message?.role === 'user' || message?.role === 'assistant') && isNonEmptyString(message?.content))
+                .map((message) => ({
+                    role: message.role === 'assistant' ? 'assistant' : 'user',
+                    content: message.content.trim()
+                }))
+            : [];
+        const imageContentBlock = buildAnthropicImageContentBlock(image);
+
+        let lastUserIndex = -1;
+        for (let i = normalizedMessages.length - 1; i >= 0; i -= 1) {
+            if (normalizedMessages[i].role === 'user') {
+                lastUserIndex = i;
+                break;
+            }
+        }
+
+        const anthropicMessages = normalizedMessages.map((message, index) => {
+            if (imageContentBlock && index === lastUserIndex) {
+                return {
+                    role: 'user',
+                    content: [
+                        imageContentBlock,
+                        { type: 'text', text: message.content }
+                    ]
+                };
+            }
+            return message;
+        });
+
+        if (imageContentBlock && lastUserIndex === -1) {
+            anthropicMessages.push({
+                role: 'user',
+                content: [
+                    imageContentBlock,
+                    { type: 'text', text: 'Use the attached screenshot as additional context.' }
+                ]
+            });
+        }
+
+        return anthropicMessages;
+    }
+
+    function buildAnthropicMessagesRequest(payload = {}) {
+        const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+        const image = isNonEmptyString(payload?.image) ? payload.image.trim() : '';
+        const effectiveProfile = payload?.profile && typeof payload.profile === 'object' && !Array.isArray(payload.profile)
+            ? payload.profile
+            : null;
+        const selectedModel = normalizeAnthropicModel(payload?.model || selectedAnthropicModel);
+
+        return {
+            model: selectedModel,
+            system: buildDefaultChatSystemPrompt({ hasScreenshot: Boolean(image), effectiveProfile }),
+            messages: buildAnthropicMessagesInput(messages, image),
+            max_tokens: 2048,
+            stream: true
+        };
+    }
+
+    function buildNvidiaChatCompletionsRequest(payload = {}) {
+        const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+        const effectiveProfile = payload?.profile && typeof payload.profile === 'object' && !Array.isArray(payload.profile)
+            ? payload.profile
+            : null;
+        const selectedModel = normalizeNvidiaModel(payload?.model || selectedNvidiaModel);
+
+        return {
+            model: selectedModel,
+            messages: [
+                {
+                    role: 'system',
+                    content: buildDefaultChatSystemPrompt({ hasScreenshot: false, effectiveProfile })
+                },
+                ...messages
+                    .filter((message) => (message?.role === 'user' || message?.role === 'assistant') && isNonEmptyString(message?.content))
+                    .map((message) => ({
+                        role: message.role === 'assistant' ? 'assistant' : 'user',
+                        content: message.content.trim()
+                    }))
+            ],
+            max_tokens: 2048,
+            stream: true
+        };
+    }
+
+    function buildOpenrouterChatCompletionsRequest(payload = {}) {
+        const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+        const image = isNonEmptyString(payload?.image) ? payload.image.trim() : '';
+        const effectiveProfile = payload?.profile && typeof payload.profile === 'object' && !Array.isArray(payload.profile)
+            ? payload.profile
+            : null;
+        const selectedModel = normalizeOpenrouterModel(payload?.model || selectedOpenrouterModel);
+
+        return {
+            model: selectedModel,
+            messages: buildOpenAiCompatibleChatMessages(messages, image, effectiveProfile),
+            max_tokens: 2048,
+            stream: true
+        };
+    }
+
+    function buildProviderChatRequest(payload = {}) {
+        const provider = normalizeAiProvider(payload?.provider || selectedAiProvider);
+        const apiKey = getSelectedApiKeyForProvider(provider);
+        if (!apiKey) {
+            throw new Error(`Add your ${getAiProviderLabel(provider)} API key in Profile or the chat window before chatting.`);
+        }
+
+        if (provider === 'anthropic') {
+            return {
+                provider,
+                providerLabel: getAiProviderLabel(provider),
+                requestUrl: ANTHROPIC_MESSAGES_API_URL,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-api-key': apiKey,
+                    'anthropic-version': ANTHROPIC_API_VERSION
+                },
+                body: JSON.stringify(buildAnthropicMessagesRequest(payload))
+            };
+        }
+
+        if (provider === 'gemini') {
+            const request = buildGeminiGenerateContentRequest(payload);
+            return {
+                provider,
+                providerLabel: getAiProviderLabel(provider),
+                requestUrl: request.requestUrl,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-goog-api-key': apiKey
+                },
+                body: JSON.stringify(request.body)
+            };
+        }
+
+        if (provider === 'nvidia') {
+            return {
+                provider,
+                providerLabel: getAiProviderLabel(provider),
+                requestUrl: NVIDIA_CHAT_COMPLETIONS_API_URL,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${apiKey}`
+                },
+                body: JSON.stringify(buildNvidiaChatCompletionsRequest(payload))
+            };
+        }
+
+        if (provider === 'openrouter') {
+            return {
+                provider,
+                providerLabel: getAiProviderLabel(provider),
+                requestUrl: OPENROUTER_CHAT_COMPLETIONS_API_URL,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${apiKey}`
+                },
+                body: JSON.stringify(buildOpenrouterChatCompletionsRequest(payload))
+            };
+        }
+
+        return {
+            provider,
+            providerLabel: getAiProviderLabel(provider),
+            requestUrl: OPENAI_RESPONSES_API_URL,
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`
+            },
+            body: JSON.stringify(buildOpenAiResponsesRequest(payload))
+        };
+    }
+
     function applyProfileFormValues(profileInputs, profile) {
         const hasStoredProfile = profile && typeof profile === 'object' && !Array.isArray(profile);
         const source = hasStoredProfile ? profile : {};
         const cachedIdentity = readProfileIdentityFromLocalStorage();
         const accountFullName = getAccountFullName();
-        const accountEmail = getAccountEmail();
         const resolvedFullName = hasStoredProfile
             ? (isNonEmptyString(source.fullName) ? source.fullName.trim() : '')
             : (cachedIdentity?.fullName || accountFullName);
-        const resolvedEmail = hasStoredProfile
-            ? (isNonEmptyString(source.email) ? source.email.trim() : '')
-            : (cachedIdentity?.email || accountEmail);
 
         if (profileInputs.profileNameInput) profileInputs.profileNameInput.value = resolvedFullName;
-        if (profileInputs.profileNicknameInput) profileInputs.profileNicknameInput.value = source.nickname || '';
-        if (profileInputs.profileEmailInput) profileInputs.profileEmailInput.value = resolvedEmail;
-        if (profileInputs.profilePhoneInput) profileInputs.profilePhoneInput.value = source.phone || '';
-        if (profileInputs.profileNotesInput) profileInputs.profileNotesInput.value = source.notes || '';
 
         return {
-            fullName: resolvedFullName,
-            nickname: source.nickname || '',
-            email: resolvedEmail,
-            phone: source.phone || '',
-            notes: source.notes || ''
+            fullName: resolvedFullName
         };
     }
 
@@ -733,42 +1791,6 @@
         return new Promise((resolve) => storageSetSafe(data, resolve));
     }
 
-    function normalizePreferredOpenStyle(rawValue) {
-        const normalizedValue = typeof rawValue === 'string' ? rawValue.trim().toLowerCase() : '';
-        return normalizedValue === 'sidebar' ? 'sidebar' : 'window';
-    }
-
-    function isSidebarPreferredOpenStyle() {
-        return normalizePreferredOpenStyle(preferredOpenStyle) === 'sidebar';
-    }
-
-    function syncPreferredOpenStyleUi() {
-        if (!shadowRoot) return;
-        const optionInputs = shadowRoot.querySelectorAll('input[name="sc-default-open-style"]');
-        optionInputs.forEach((input) => {
-            const isChecked = normalizePreferredOpenStyle(input.value) === preferredOpenStyle;
-            input.checked = isChecked;
-            const optionCard = input.closest('.sc-open-style-option');
-            if (optionCard) {
-                optionCard.classList.toggle('selected', isChecked);
-            }
-        });
-    }
-
-    function setPreferredOpenStyle(nextStyle, { persist = true } = {}) {
-        preferredOpenStyle = normalizePreferredOpenStyle(nextStyle);
-        syncPreferredOpenStyleUi();
-        if (persist) {
-            storageSetSafe({ [DEFAULT_OPEN_STYLE_KEY]: preferredOpenStyle });
-        }
-        return preferredOpenStyle;
-    }
-
-    async function loadPreferredOpenStyle() {
-        const storedValues = await storageGet([DEFAULT_OPEN_STYLE_KEY]);
-        return setPreferredOpenStyle(storedValues?.[DEFAULT_OPEN_STYLE_KEY], { persist: false });
-    }
-
     function normalizeKeepAcrossTabsState(rawState) {
         const workflowSource = rawState?.workflow && typeof rawState.workflow === 'object' && !Array.isArray(rawState.workflow)
             ? rawState.workflow
@@ -867,25 +1889,11 @@
     function sendSurfaceRuntimeMessage(payload) {
         const nextPayload = payload && typeof payload === 'object' ? { ...payload } : {};
         if (!IS_SIDEPANEL_SURFACE) {
-            if (nextPayload.action === 'open_side_panel') {
-                console.info('[OpenStyle] Sending sidebar open request from content surface', {
-                    surface: APP_SURFACE,
-                    preferredOpenStyle,
-                    windowId: null
-                });
-            }
             return chrome.runtime.sendMessage(nextPayload);
         }
         return getSurfaceWindowId().then((surfaceWindowId) => {
             if (Number.isInteger(surfaceWindowId)) {
                 nextPayload.windowId = surfaceWindowId;
-            }
-            if (nextPayload.action === 'open_side_panel') {
-                console.info('[OpenStyle] Sending sidebar open request from sidepanel surface', {
-                    surface: APP_SURFACE,
-                    preferredOpenStyle,
-                    windowId: Number.isInteger(surfaceWindowId) ? surfaceWindowId : null
-                });
             }
             return chrome.runtime.sendMessage(nextPayload);
         });
@@ -899,109 +1907,22 @@
         return normalizeKeepAcrossTabsState(response);
     }
 
-    async function openKeepAcrossTabsPanel() {
-        const response = await sendSurfaceRuntimeMessage({ action: 'open_keep_across_tabs_panel' });
-        if (!response?.ok || !response?.active) {
-            throw new Error(response?.error || 'Unable to open keep across tabs');
-        }
-        return response;
-    }
-
     async function openDefaultSidePanel() {
-        console.info('[OpenStyle] Requesting default sidebar open', {
-            surface: APP_SURFACE,
-            preferredOpenStyle
-        });
         const response = await sendSurfaceRuntimeMessage({ action: 'open_side_panel' });
-        console.info('[OpenStyle] Sidebar open response received', {
-            surface: APP_SURFACE,
-            preferredOpenStyle,
-            ok: !!response?.ok,
-            windowId: Number.isInteger(response?.windowId) ? response.windowId : null,
-            error: response?.error || null
-        });
         if (!response?.ok) {
             throw new Error(response?.error || 'Unable to open sidebar');
         }
         return response;
     }
 
-    function syncKeepAcrossTabsUi() {
-        const keepAcrossTabsBtn = shadowRoot?.getElementById('sc-keep-across-tabs');
-        const isActive = !!keepAcrossTabsState.active;
-        if (keepAcrossTabsBtn) {
-            keepAcrossTabsBtn.classList.toggle('active', isActive);
-            keepAcrossTabsBtn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
-            keepAcrossTabsBtn.setAttribute('title', 'Keep across tabs');
-            keepAcrossTabsBtn.setAttribute('aria-label', 'Keep across tabs');
-            keepAcrossTabsBtn.disabled = !!keepAcrossTabsRequestInFlight;
-        }
-
-        const panel = shadowRoot?.getElementById('sc-panel');
-        if (panel) {
-            panel.toggleAttribute('data-keep-across-tabs-active', isActive);
-        }
-    }
-
-    async function refreshKeepAcrossTabsState({ hideInlineUiOnActive = true } = {}) {
-        const wasKeepAcrossTabsActive = !!keepAcrossTabsState.active;
+    async function refreshKeepAcrossTabsState() {
         try {
             keepAcrossTabsState = await fetchKeepAcrossTabsState();
         } catch (error) {
             console.warn('[KeepAcrossTabs] State refresh failed:', error);
             keepAcrossTabsState = normalizeKeepAcrossTabsState(null);
         }
-
-        syncKeepAcrossTabsUi();
-
-        if (!IS_SIDEPANEL_SURFACE && keepAcrossTabsState.active && hideInlineUiOnActive) {
-            setUiMode('hidden');
-        } else if (!IS_SIDEPANEL_SURFACE && wasKeepAcrossTabsActive && !keepAcrossTabsState.active && uiState.mode === 'hidden') {
-            setActivePane('chat', false);
-            setUiMode('open');
-        }
-
         return keepAcrossTabsState;
-    }
-
-    async function setKeepAcrossTabsEnabled(enabled) {
-        const response = await sendSurfaceRuntimeMessage({
-            action: 'set_keep_across_tabs_state',
-            enabled: !!enabled,
-            sessionId,
-            sessionUrl,
-            updatedAt: sessionUpdatedAt || getLatestConversationTimestamp(conversationHistory)
-        });
-        if (!response?.ok) {
-            throw new Error(response?.error || 'Unable to update keep across tabs');
-        }
-        keepAcrossTabsState = normalizeKeepAcrossTabsState(response);
-        syncKeepAcrossTabsUi();
-        return keepAcrossTabsState;
-    }
-
-    async function toggleKeepAcrossTabs() {
-        if (keepAcrossTabsRequestInFlight) return;
-        keepAcrossTabsRequestInFlight = true;
-        syncKeepAcrossTabsUi();
-
-        try {
-            const nextEnabled = !keepAcrossTabsState.active;
-            if (nextEnabled) {
-                persistConversationState({ updatedAt: sessionUpdatedAt || getLatestConversationTimestamp(conversationHistory) });
-            }
-
-            const nextState = await setKeepAcrossTabsEnabled(nextEnabled);
-            if (!IS_SIDEPANEL_SURFACE && nextState.active) {
-                setUiMode('hidden');
-            }
-        } catch (error) {
-            console.warn('[KeepAcrossTabs] Toggle failed:', error);
-            await refreshKeepAcrossTabsState({ hideInlineUiOnActive: false });
-        } finally {
-            keepAcrossTabsRequestInFlight = false;
-            syncKeepAcrossTabsUi();
-        }
     }
 
     function getSessionDomainForUrl(urlValue = sessionUrl) {
@@ -1744,11 +2665,92 @@
             return;
         }
 
+        if (event?.type === 'response.output_text.delta' && typeof event.delta === 'string') {
+            state.reply += event.delta;
+            if (typeof onPartialText === 'function') {
+                onPartialText(cleanAiReply(state.reply, { allowPartial: true }));
+            }
+            return;
+        }
+
+        if (event?.type === 'response.output_text.done' && typeof event.text === 'string') {
+            state.reply = event.text;
+            if (typeof onPartialText === 'function') {
+                onPartialText(cleanAiReply(state.reply));
+            }
+            return;
+        }
+
+        if (event?.type === 'response.completed') {
+            const finalReply = extractStructuredReplyText(event?.response) || state.reply;
+            if (!isNonEmptyString(finalReply)) return;
+            state.reply = finalReply;
+            if (typeof onPartialText === 'function') {
+                onPartialText(cleanAiReply(state.reply));
+            }
+            return;
+        }
+
+        if (event?.type === 'response.failed') {
+            throw new Error(
+                event?.response?.error?.message
+                || event?.error?.message
+                || 'AI request failed'
+            );
+        }
+
+        if (event?.type === 'content_block_delta' && event?.delta?.type === 'text_delta' && typeof event?.delta?.text === 'string') {
+            state.reply += event.delta.text;
+            if (typeof onPartialText === 'function') {
+                onPartialText(cleanAiReply(state.reply, { allowPartial: true }));
+            }
+            return;
+        }
+
+        if (Array.isArray(event?.candidates)) {
+            const geminiText = extractStructuredReplyText(event.candidates);
+            if (!isNonEmptyString(geminiText)) return;
+            state.reply += geminiText;
+            if (typeof onPartialText === 'function') {
+                onPartialText(cleanAiReply(state.reply, { allowPartial: true }));
+            }
+            return;
+        }
+
+        if (Array.isArray(event?.choices)) {
+            const choice = event.choices[0] || null;
+            const deltaText = typeof choice?.delta?.content === 'string'
+                ? choice.delta.content
+                : extractStructuredReplyText(choice?.delta);
+            if (isNonEmptyString(deltaText)) {
+                state.reply += deltaText;
+                if (typeof onPartialText === 'function') {
+                    onPartialText(cleanAiReply(state.reply, { allowPartial: true }));
+                }
+                return;
+            }
+
+            const finalChoiceText = typeof choice?.message?.content === 'string'
+                ? choice.message.content
+                : extractStructuredReplyText(choice?.message);
+            if (isNonEmptyString(finalChoiceText)) {
+                state.reply = finalChoiceText;
+                if (typeof onPartialText === 'function') {
+                    onPartialText(cleanAiReply(state.reply));
+                }
+            }
+            return;
+        }
+
         if (event?.type === 'error') {
             throw new Error(
-                typeof event.error === 'string' && event.error.trim()
-                    ? event.error.trim()
-                    : 'Backend stream failed'
+                (typeof event?.error?.message === 'string' && event.error.message.trim())
+                    ? event.error.message.trim()
+                    : ((typeof event.error === 'string' && event.error.trim())
+                        ? event.error.trim()
+                        : ((typeof event?.message === 'string' && event.message.trim())
+                            ? event.message.trim()
+                            : 'AI stream failed'))
             );
         }
     }
@@ -1795,14 +2797,11 @@
     }
 
     async function requestChatReplyStreamViaBackground(payload, { signal, onPartialText } = {}) {
-        const requestUrl = await apiUrl('/api/chat/stream');
-        const requestHeaders = withAuthHeaders({
-            headers: { 'Content-Type': 'application/json' }
-        });
+        const requestConfig = buildProviderChatRequest(payload);
         const streamOptions = normalizeProxyFetchOptions({
             method: 'POST',
-            headers: requestHeaders.headers,
-            body: JSON.stringify(payload)
+            headers: requestConfig.headers,
+            body: requestConfig.body
         });
 
         return new Promise((resolve, reject) => {
@@ -1898,7 +2897,7 @@
 
             port.postMessage({
                 type: 'start',
-                url: requestUrl,
+                url: requestConfig.requestUrl,
                 options: streamOptions
             });
         });
@@ -1906,23 +2905,19 @@
 
     async function requestChatReplyStreamDirect(payload, { signal, onPartialText } = {}) {
         const state = { reply: '', buffer: '' };
+        const requestConfig = buildProviderChatRequest(payload);
+
         const requestOptions = {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
+            headers: requestConfig.headers,
+            body: requestConfig.body,
             signal
         };
 
-        let response = await apiFetchDirect('/api/chat/stream', requestOptions);
-        if (isUnauthorizedResponse(response) && getRefreshToken()) {
-            const refreshedSession = await refreshAuthSession();
-            if (refreshedSession?.authToken) {
-                response = await apiFetchDirect('/api/chat/stream', requestOptions);
-            }
-        }
+        const response = await fetch(requestConfig.requestUrl, requestOptions);
 
         if (!response.ok) {
-            const errorMessage = await getApiErrorMessage(response, 'Backend failed');
+            const errorMessage = await getApiErrorMessage(response, `${requestConfig.providerLabel} request failed`);
             throw new Error(errorMessage);
         }
 
@@ -1943,6 +2938,33 @@
 
     async function requestChatReply(payload, { signal, onPartialText } = {}) {
         return requestChatReplyStream(payload, { signal, onPartialText });
+    }
+
+    async function persistChatExchangeToBackend({ messages, reply, sessionId, sessionUrl, clientContext, model, provider }) {
+        if (!isAuthenticated()) {
+            return false;
+        }
+
+        const normalizedProvider = normalizeAiProvider(provider || selectedAiProvider);
+
+        const response = await apiFetch('/api/history/log', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                messages,
+                reply,
+                sessionId,
+                sessionUrl,
+                clientContext,
+                model: `${normalizedProvider}:${normalizeModelForProvider(normalizedProvider, model || getSelectedModelForProvider(normalizedProvider))}`
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error(await getApiErrorMessage(response, 'Failed to save chat history'));
+        }
+
+        return true;
     }
 
     // =============================================================================
@@ -2508,6 +3530,10 @@
     const LEGACY_PANEL_HEIGHT = 620;
     const MIN_PANEL_WIDTH = 340;
     const MIN_PANEL_HEIGHT = 560;
+    const MEDIUM_SCREEN_MIN_PANEL_WIDTH = 312;
+    const SMALL_SCREEN_MIN_PANEL_WIDTH = 296;
+    const MEDIUM_SCREEN_MIN_PANEL_HEIGHT = 500;
+    const SMALL_SCREEN_MIN_PANEL_HEIGHT = 460;
     const MAX_PANEL_WIDTH = 420;
     const MAX_PANEL_HEIGHT = 720;
     const DEFAULT_UI_STATE = {
@@ -2607,18 +3633,48 @@
         return window.matchMedia('(max-width: 640px)').matches ? 8 : 12;
     }
 
+    function getResponsivePanelMinimums() {
+        let minWidth = MIN_PANEL_WIDTH;
+        let minHeight = MIN_PANEL_HEIGHT;
+
+        if (window.innerWidth <= 1366) {
+            minWidth = MEDIUM_SCREEN_MIN_PANEL_WIDTH;
+        }
+        if (window.innerWidth <= 1180) {
+            minWidth = SMALL_SCREEN_MIN_PANEL_WIDTH;
+        }
+
+        if (window.innerHeight <= 900) {
+            minHeight = MEDIUM_SCREEN_MIN_PANEL_HEIGHT;
+        }
+        if (window.innerHeight <= 780) {
+            minHeight = SMALL_SCREEN_MIN_PANEL_HEIGHT;
+        }
+
+        return { minWidth, minHeight };
+    }
+
     function getPanelSizeLimits() {
         const viewportPadding = getViewportPadding();
+        const responsiveMinimums = getResponsivePanelMinimums();
         const maxWidth = Math.min(MAX_PANEL_WIDTH, Math.max(220, window.innerWidth - (viewportPadding * 2)));
         const maxHeight = Math.min(MAX_PANEL_HEIGHT, Math.max(280, window.innerHeight - (viewportPadding * 2)));
-        const minWidth = Math.min(MIN_PANEL_WIDTH, maxWidth);
-        const minHeight = Math.min(MIN_PANEL_HEIGHT, maxHeight);
+        const minWidth = Math.min(responsiveMinimums.minWidth, maxWidth);
+        const minHeight = Math.min(responsiveMinimums.minHeight, maxHeight);
         return {
             viewportPadding,
             minWidth,
             minHeight,
             maxWidth,
             maxHeight
+        };
+    }
+
+    function getResponsiveDefaultPanelSize() {
+        const { minWidth, minHeight } = getPanelSizeLimits();
+        return {
+            width: minWidth,
+            height: minHeight
         };
     }
 
@@ -2639,8 +3695,17 @@
 
     function normalizeUiGeometry() {
         const { viewportPadding, minWidth, minHeight, maxWidth, maxHeight } = getPanelSizeLimits();
-        const safeWidth = Number.isFinite(uiState.width) ? uiState.width : DEFAULT_PANEL_WIDTH;
-        const safeHeight = Number.isFinite(uiState.height) ? uiState.height : DEFAULT_PANEL_HEIGHT;
+        const defaultPanelSize = getResponsiveDefaultPanelSize();
+        const safeWidth = Number.isFinite(uiState.width) ? uiState.width : defaultPanelSize.width;
+        const safeHeight = Number.isFinite(uiState.height) ? uiState.height : defaultPanelSize.height;
+
+        if (!uiState.customPosition) {
+            uiState.width = defaultPanelSize.width;
+            uiState.height = defaultPanelSize.height;
+            uiState.panelPosition = getDefaultPanelPosition(uiState.width, uiState.height, uiState.side);
+            return;
+        }
+
         uiState.width = Math.round(clamp(safeWidth, minWidth, maxWidth));
         uiState.height = Math.round(clamp(safeHeight, minHeight, maxHeight));
 
@@ -2648,7 +3713,7 @@
             && Number.isFinite(uiState.panelPosition.left)
             && Number.isFinite(uiState.panelPosition.top);
 
-        if (!hasPosition || !uiState.customPosition) {
+        if (!hasPosition) {
             uiState.panelPosition = getDefaultPanelPosition(uiState.width, uiState.height, uiState.side);
             return;
         }
@@ -2891,6 +3956,9 @@
         profileTabs.forEach((tab) => tab.classList.toggle('active', targetPane === 'profile'));
 
         uiState.activePane = targetPane;
+        if (targetPane === 'profile') {
+            refreshShortcutInfo();
+        }
         refreshProfileNudgeVisibility();
         if (persist) persistUiState();
     }
@@ -3185,6 +4253,10 @@
         return isMacDevice() ? ['⌘', '⇧', 'Y'] : ['Ctrl', 'Shift', 'Y'];
     }
 
+    function getDefaultShortcutText() {
+        return isMacDevice() ? 'Command+Shift+Y' : 'Ctrl+Shift+Y';
+    }
+
     function isEdgeBrowser() {
         const brands = Array.isArray(navigator.userAgentData?.brands) ? navigator.userAgentData.brands : [];
         if (brands.some((brand) => /microsoft edge/i.test(brand?.brand || ''))) {
@@ -3208,6 +4280,68 @@
         if (!response?.ok) {
             throw new Error(response?.error || 'Unable to open shortcut settings');
         }
+    }
+
+    function normalizeShortcutText(rawShortcut) {
+        return typeof rawShortcut === 'string' ? rawShortcut.trim() : '';
+    }
+
+    function renderProfileShortcutInfo(shortcutInfo = currentShortcutInfo) {
+        if (!shadowRoot) return;
+
+        const valueEl = shadowRoot.getElementById('sc-profile-shortcut-value');
+        const metaEl = shadowRoot.getElementById('sc-profile-shortcut-meta');
+        const linkEl = shadowRoot.getElementById('sc-profile-shortcut-link');
+        const browserName = getShortcutSettingsInfo().browserName;
+        const shortcut = normalizeShortcutText(shortcutInfo?.shortcut);
+        const commandShortcut = normalizeShortcutText(shortcutInfo?.commandShortcut);
+        const source = typeof shortcutInfo?.source === 'string' ? shortcutInfo.source.trim().toLowerCase() : 'none';
+        const isLoading = !!shortcutInfo?.loading;
+
+        if (valueEl) {
+            valueEl.textContent = isLoading
+                ? 'Loading...'
+                : (shortcut || 'Not set');
+        }
+
+        if (metaEl) {
+            let metaText = `No ${browserName} shortcut is assigned. Open settings to set one.`;
+            if (source === 'command' && commandShortcut) {
+                metaText = `This ${browserName} shortcut opens the ScreenChat side panel.`;
+            }
+
+            metaEl.textContent = isLoading
+                ? `Checking ${browserName} shortcut settings...`
+                : metaText;
+        }
+
+        if (linkEl instanceof HTMLAnchorElement) {
+            linkEl.textContent = shortcut ? 'Change' : 'Set shortcut';
+        }
+    }
+
+    async function refreshShortcutInfo() {
+        renderProfileShortcutInfo({ loading: true });
+
+        try {
+            const response = await sendSurfaceRuntimeMessage({
+                action: 'get_shortcut_info',
+                commandName: SCREENCHAT_SHORTCUT_COMMAND
+            });
+            if (!response?.ok) {
+                throw new Error(response?.error || 'Unable to fetch shortcut info');
+            }
+            currentShortcutInfo = response;
+        } catch (error) {
+            console.warn('[Shortcuts] Fetch shortcut info failed:', error);
+            currentShortcutInfo = {
+                commandName: SCREENCHAT_SHORTCUT_COMMAND,
+                shortcut: '',
+                isAssigned: false
+            };
+        }
+
+        renderProfileShortcutInfo(currentShortcutInfo);
     }
 
     function installHostEventShield(host) {
@@ -3274,54 +4408,23 @@
     }
 
     function openUiFromActivation() {
-        console.info('[OpenStyle] Activation requested', {
-            surface: APP_SURFACE,
-            preferredOpenStyle,
-            keepAcrossTabsActive: !!keepAcrossTabsState.active,
-            uiMode: uiState.mode
-        });
-        if (!IS_SIDEPANEL_SURFACE && keepAcrossTabsState.active) {
-            openKeepAcrossTabsPanel()
-                .then(() => {
-                    console.info('[OpenStyle] Reopened existing keep-across-tabs sidebar');
-                    setUiMode('hidden');
-                })
-                .catch((error) => {
-                    const errorMessage = String(error?.message || '');
-                    if (errorMessage.includes('No active keep across tabs workflow')) {
-                        refreshKeepAcrossTabsState({ hideInlineUiOnActive: false }).catch(() => {});
-                    } else {
-                        console.warn('[KeepAcrossTabs] Failed to reopen side panel:', error);
-                    }
-                    setActivePane('chat', false);
-                    setUiMode('open');
-                });
-            return;
-        }
-
-        if (!IS_SIDEPANEL_SURFACE && isSidebarPreferredOpenStyle()) {
+        if (!IS_SIDEPANEL_SURFACE) {
             openDefaultSidePanel()
                 .then(() => {
-                    console.info('[OpenStyle] Preferred sidebar opened successfully');
                     setUiMode('hidden');
                 })
                 .catch((error) => {
-                    console.warn('[OpenStyle] Failed to open preferred sidebar:', error);
-                    console.info('[OpenStyle] Falling back to inline window after sidebar open failure');
-                    openInlineUiFromActivation();
+                    console.warn('Sidebar open failed:', error);
                 });
             return;
         }
 
-        console.info('[OpenStyle] Opening inline window');
         openInlineUiFromActivation();
     }
 
     function restoreInlineUiFromSidePanel() {
         if (IS_SIDEPANEL_SURFACE) return;
-        setActivePane('chat', false);
-        setUiMode('open');
-        focusChatInput();
+        setUiMode('hidden');
     }
 
     function runUiAction(action, source = 'runtime_message') {
@@ -3360,6 +4463,69 @@
         statusEl.classList.toggle('error', !!isError);
     }
 
+    function syncInlineApiKeyPrompt() {
+        if (!shadowRoot) return;
+        const promptCard = shadowRoot.getElementById('sc-inline-api-key-card');
+        const promptTitle = shadowRoot.getElementById('sc-inline-api-key-title');
+        const promptHelp = shadowRoot.getElementById('sc-inline-api-key-help');
+        const promptInput = shadowRoot.getElementById('sc-inline-api-key-input');
+        const promptSaveBtn = shadowRoot.getElementById('sc-inline-api-key-save');
+        const promptProviderPillList = shadowRoot.getElementById('sc-inline-provider-pill-list');
+        const chatPane = shadowRoot.getElementById('sc-chat-pane');
+        const toolbar = shadowRoot.getElementById('sc-chat-toolbar');
+        const messagesArea = shadowRoot.getElementById('sc-messages');
+        const quickPrompts = shadowRoot.getElementById('sc-quick-prompts');
+        const hotkeyHint = shadowRoot.getElementById('sc-hotkey-hint');
+        const inputArea = shadowRoot.getElementById('sc-chat-input-area');
+        if (!promptCard) return;
+
+        syncActiveProviderState();
+        const provider = normalizeAiProvider(selectedAiProvider);
+        const providerLabel = getAiProviderLabel(provider);
+        const requiresSetup = shouldShowChatSetupState();
+        const shouldShow = requiresSetup;
+
+        promptCard.hidden = !shouldShow;
+        promptCard.classList.toggle('is-setup', requiresSetup);
+
+        if (chatPane instanceof HTMLElement) {
+            chatPane.classList.toggle('sc-chat-pane-setup', requiresSetup);
+        }
+        if (toolbar instanceof HTMLElement) {
+            toolbar.hidden = requiresSetup || !hasAnyConfiguredProvider();
+        }
+        if (messagesArea instanceof HTMLElement) {
+            messagesArea.hidden = requiresSetup;
+        }
+        if (quickPrompts instanceof HTMLElement) {
+            quickPrompts.hidden = requiresSetup;
+        }
+        if (hotkeyHint instanceof HTMLElement) {
+            hotkeyHint.hidden = requiresSetup;
+        }
+        if (inputArea instanceof HTMLElement) {
+            inputArea.hidden = requiresSetup;
+        }
+        if (promptProviderPillList instanceof HTMLElement) {
+            promptProviderPillList.innerHTML = renderAiProviderPills('sc-inline-provider', provider);
+        }
+
+        if (promptTitle) {
+            promptTitle.textContent = `Enter your ${providerLabel} API key here`;
+        }
+        if (promptHelp) {
+            promptHelp.textContent = getProviderKeyHelpCopy(provider);
+        }
+        if (promptInput instanceof HTMLInputElement) {
+            promptInput.placeholder = getProviderApiKeyPlaceholder(provider);
+            promptInput.value = '';
+            promptInput.setAttribute('aria-label', `Enter your ${providerLabel} API key`);
+        }
+        if (promptSaveBtn instanceof HTMLButtonElement) {
+            promptSaveBtn.textContent = `Save ${providerLabel} key`;
+        }
+    }
+
     function syncAuthUi() {
         if (!shadowRoot) return;
         const authenticated = isAuthenticated();
@@ -3374,7 +4540,6 @@
         const accountAvatarEl = shadowRoot.getElementById('sc-account-avatar');
         const accountAvatarFallbackEl = shadowRoot.getElementById('sc-account-avatar-fallback');
         const accountNameEl = shadowRoot.getElementById('sc-account-name');
-        const accountEmailEl = shadowRoot.getElementById('sc-account-email');
         const signedInUser = authenticated ? authSession?.user : null;
 
         if (authUserEl) {
@@ -3390,14 +4555,8 @@
             const resolvedAccountName = isNonEmptyString(userProfile?.fullName)
                 ? userProfile.fullName.trim()
                 : getUserDisplayName(signedInUser);
-            const resolvedAccountEmail = isNonEmptyString(userProfile?.email)
-                ? userProfile.email.trim()
-                : (signedInUser.email || '');
             if (accountNameEl) {
                 accountNameEl.textContent = resolvedAccountName;
-            }
-            if (accountEmailEl) {
-                accountEmailEl.textContent = resolvedAccountEmail;
             }
             if (accountAvatarFallbackEl) {
                 accountAvatarFallbackEl.textContent = getUserAvatarInitial(signedInUser);
@@ -3438,11 +4597,27 @@
                 }
             }
         } else if (!isAwaitingResponse) {
-            setInputState(true, 'Ask me anything...');
+            const providerReady = hasApiKeyForProvider(selectedAiProvider);
+            setInputState(
+                providerReady,
+                providerReady
+                    ? 'Ask me anything...'
+                    : `Add your ${getAiProviderLabel(selectedAiProvider)} API key below to continue...`
+            );
             if (uiState.activePane === 'auth') {
                 setActivePane('chat', false);
             }
+            if (providerReady) {
+                const messagesArea = shadowRoot.getElementById('sc-messages');
+                const hasVisibleMessages = !!messagesArea?.querySelector('.sc-message');
+                if (!conversationHistory.length && !hasVisibleMessages) {
+                    renderWelcomeMessage(false);
+                }
+            }
         }
+
+        syncChatToolbarUi();
+        syncInlineApiKeyPrompt();
     }
 
     function requireAuthenticationUi(message = 'Please sign in with Google to continue.') {
@@ -3516,12 +4691,18 @@
         const prompts = shadowRoot?.getElementById('sc-quick-prompts');
         const messagesArea = shadowRoot?.getElementById('sc-messages');
         const hotkeyHint = shadowRoot?.getElementById('sc-hotkey-hint');
+        if (shouldShowChatSetupState()) {
+            if (prompts) prompts.classList.add('hidden');
+            if (hotkeyHint) hotkeyHint.classList.add('hidden');
+            if (messagesArea) messagesArea.classList.remove('is-empty');
+            return;
+        }
         const hasUserMessageInHistory = conversationHistory.some((msg) => {
             const role = typeof msg?.role === 'string' ? msg.role.trim().toLowerCase() : '';
             return role === 'user' || role === 'human';
         });
         const hasUserMessageInDom = !!messagesArea?.querySelector('.sc-message.user');
-        const shouldHidePrompts = !isAuthenticated() || hasUserMessageInHistory || hasUserMessageInDom || isAwaitingResponse;
+        const shouldHidePrompts = !isAuthenticated() || !hasApiKeyForProvider(selectedAiProvider) || hasUserMessageInHistory || hasUserMessageInDom || isAwaitingResponse;
         if (prompts) {
             prompts.classList.toggle('hidden', shouldHidePrompts);
         }
@@ -3536,6 +4717,12 @@
     function renderWelcomeMessage(withTypewriter = false) {
         const messagesArea = shadowRoot?.getElementById('sc-messages');
         if (!messagesArea) return;
+        if (!hasAnyConfiguredProvider() || shouldShowChatSetupState()) {
+            messagesArea.innerHTML = '';
+            hasTypedWelcome = false;
+            syncQuickPromptsVisibility();
+            return;
+        }
         messagesArea.innerHTML = '';
         const welcomeMessageEl = addMessage('', 'ai', null, true, Date.now(), true);
         const bubble = welcomeMessageEl?.querySelector('.sc-bubble');
@@ -3579,15 +4766,24 @@
         }
     }
 
-    function openInlineUiFromActivation() {
-        uiState.side = 'right';
+    function resetInlineUiPlacement(side = 'right') {
+        const resolvedSide = side === 'left' ? 'left' : 'right';
+        const defaultPanelSize = getResponsiveDefaultPanelSize();
+        uiState.side = resolvedSide;
+        uiState.width = defaultPanelSize.width;
+        uiState.height = defaultPanelSize.height;
         uiState.customPosition = false;
-        uiState.panelPosition = getDefaultPanelPosition(uiState.width, uiState.height, 'right');
+        uiState.panelPosition = getDefaultPanelPosition(defaultPanelSize.width, defaultPanelSize.height, resolvedSide);
+    }
+
+    function openInlineUiFromActivation() {
+        resetInlineUiPlacement('right');
         setAttachScreenEnabled(true);
         resetConversationState();
         renderWelcomeMessage(false);
         setActivePane('chat', false);
         setUiMode('open');
+        focusChatInput();
     }
 
     function getUiSvgUrl(filename) {
@@ -3637,7 +4833,7 @@
 
     function hasAnyProfileValue(profile) {
         if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return false;
-        const values = [profile.fullName, profile.nickname, profile.email, profile.phone, profile.notes];
+        const values = [profile.fullName];
         return values.some((value) => typeof value === 'string' && value.trim().length > 0);
     }
 
@@ -3870,7 +5066,7 @@
         document.body.appendChild(host);
         installHostEventShield(host);
 
-        shadowRoot = host.attachShadow({ mode: 'open' });
+        shadowRoot = host.attachShadow({ mode: 'closed' });
 
         const link = document.createElement('link');
         link.rel = 'stylesheet';
@@ -3886,9 +5082,6 @@
         shadowRoot.appendChild(link);
 
         createUI();
-        loadPreferredOpenStyle().catch((error) => {
-            console.warn('[OpenStyle] Failed to load preferred opening style:', error);
-        });
         resolveApiBaseUrl().catch((error) => {
             console.warn('[API] Backend discovery failed:', error);
         });
@@ -3906,13 +5099,53 @@
 
         chrome.storage.onChanged.addListener((changes, areaName) => {
             if (areaName !== 'local') return;
-            if (changes?.[DEFAULT_OPEN_STYLE_KEY]) {
-                setPreferredOpenStyle(changes[DEFAULT_OPEN_STYLE_KEY].newValue, { persist: false });
+            if (changes?.[AI_PROVIDER_STORAGE_KEY]) {
+                applyStoredAiProvider(changes[AI_PROVIDER_STORAGE_KEY].newValue);
+                syncAuthUi();
+                syncQuickPromptsVisibility();
+            }
+            if (changes?.[OPENAI_API_KEY_STORAGE_KEY]) {
+                applyStoredApiKeyForProvider('openai', shadowRoot?.getElementById('sc-profile-provider-key'), changes[OPENAI_API_KEY_STORAGE_KEY].newValue);
+                syncAuthUi();
+                syncQuickPromptsVisibility();
+            }
+            if (changes?.[ANTHROPIC_API_KEY_STORAGE_KEY]) {
+                applyStoredApiKeyForProvider('anthropic', shadowRoot?.getElementById('sc-profile-provider-key'), changes[ANTHROPIC_API_KEY_STORAGE_KEY].newValue);
+                syncAuthUi();
+                syncQuickPromptsVisibility();
+            }
+            if (changes?.[GEMINI_API_KEY_STORAGE_KEY]) {
+                applyStoredApiKeyForProvider('gemini', shadowRoot?.getElementById('sc-profile-provider-key'), changes[GEMINI_API_KEY_STORAGE_KEY].newValue);
+                syncAuthUi();
+                syncQuickPromptsVisibility();
+            }
+            if (changes?.[NVIDIA_API_KEY_STORAGE_KEY]) {
+                applyStoredApiKeyForProvider('nvidia', shadowRoot?.getElementById('sc-profile-provider-key'), changes[NVIDIA_API_KEY_STORAGE_KEY].newValue);
+                syncAuthUi();
+                syncQuickPromptsVisibility();
+            }
+            if (changes?.[OPENROUTER_API_KEY_STORAGE_KEY]) {
+                applyStoredApiKeyForProvider('openrouter', shadowRoot?.getElementById('sc-profile-provider-key'), changes[OPENROUTER_API_KEY_STORAGE_KEY].newValue);
+                syncAuthUi();
+                syncQuickPromptsVisibility();
+            }
+            if (changes?.[OPENAI_MODEL_STORAGE_KEY]) {
+                applyStoredModelForProvider('openai', changes[OPENAI_MODEL_STORAGE_KEY].newValue);
+            }
+            if (changes?.[ANTHROPIC_MODEL_STORAGE_KEY]) {
+                applyStoredModelForProvider('anthropic', changes[ANTHROPIC_MODEL_STORAGE_KEY].newValue);
+            }
+            if (changes?.[GEMINI_MODEL_STORAGE_KEY]) {
+                applyStoredModelForProvider('gemini', changes[GEMINI_MODEL_STORAGE_KEY].newValue);
+            }
+            if (changes?.[NVIDIA_MODEL_STORAGE_KEY]) {
+                applyStoredModelForProvider('nvidia', changes[NVIDIA_MODEL_STORAGE_KEY].newValue);
+            }
+            if (changes?.[OPENROUTER_MODEL_STORAGE_KEY]) {
+                applyStoredModelForProvider('openrouter', changes[OPENROUTER_MODEL_STORAGE_KEY].newValue);
             }
             if (changes?.[KEEP_ACROSS_TABS_STATE_KEY]) {
-                refreshKeepAcrossTabsState({
-                    hideInlineUiOnActive: !keepAcrossTabsRequestInFlight
-                }).then(() => {
+                refreshKeepAcrossTabsState().then(() => {
                     if (!IS_SIDEPANEL_SURFACE || !keepAcrossTabsState.active) return null;
                     return restoreKeepAcrossTabsConversation();
                 }).catch((error) => {
@@ -3961,39 +5194,49 @@
             'messageCount',
             PROFILE_NUDGE_OPT_OUT_KEY,
             PROFILE_CACHE_KEY,
+            OPENAI_API_KEY_STORAGE_KEY,
+            ANTHROPIC_API_KEY_STORAGE_KEY,
+            GEMINI_API_KEY_STORAGE_KEY,
+            NVIDIA_API_KEY_STORAGE_KEY,
+            OPENROUTER_API_KEY_STORAGE_KEY,
+            AI_PROVIDER_STORAGE_KEY,
+            OPENAI_MODEL_STORAGE_KEY,
+            ANTHROPIC_MODEL_STORAGE_KEY,
+            GEMINI_MODEL_STORAGE_KEY,
+            NVIDIA_MODEL_STORAGE_KEY,
+            OPENROUTER_MODEL_STORAGE_KEY,
             CONVERSATION_HISTORY_KEY,
             SESSION_STATE_KEY
         ], (result) => {
             (async () => {
                 profileNudgeOptOut = !!result[PROFILE_NUDGE_OPT_OUT_KEY];
                 setAttachScreenEnabled(true);
+                applyStoredApiKeyForProvider('openai', shadowRoot?.getElementById('sc-profile-provider-key'), result[OPENAI_API_KEY_STORAGE_KEY]);
+                applyStoredApiKeyForProvider('anthropic', shadowRoot?.getElementById('sc-profile-provider-key'), result[ANTHROPIC_API_KEY_STORAGE_KEY]);
+                applyStoredApiKeyForProvider('gemini', shadowRoot?.getElementById('sc-profile-provider-key'), result[GEMINI_API_KEY_STORAGE_KEY]);
+                applyStoredApiKeyForProvider('nvidia', shadowRoot?.getElementById('sc-profile-provider-key'), result[NVIDIA_API_KEY_STORAGE_KEY]);
+                applyStoredApiKeyForProvider('openrouter', shadowRoot?.getElementById('sc-profile-provider-key'), result[OPENROUTER_API_KEY_STORAGE_KEY]);
+                applyStoredAiProvider(result[AI_PROVIDER_STORAGE_KEY]);
+                applyStoredModelForProvider('openai', result[OPENAI_MODEL_STORAGE_KEY]);
+                applyStoredModelForProvider('anthropic', result[ANTHROPIC_MODEL_STORAGE_KEY]);
+                applyStoredModelForProvider('gemini', result[GEMINI_MODEL_STORAGE_KEY]);
+                applyStoredModelForProvider('nvidia', result[NVIDIA_MODEL_STORAGE_KEY]);
+                applyStoredModelForProvider('openrouter', result[OPENROUTER_MODEL_STORAGE_KEY]);
 
                 const cachedProfileIdentity = normalizeProfileIdentity(result[PROFILE_CACHE_KEY]) || readProfileIdentityFromLocalStorage();
                 if (cachedProfileIdentity) {
                     persistProfileIdentity(cachedProfileIdentity);
                     const initialProfileInputs = {
-                        profileNameInput: shadowRoot?.getElementById('sc-profile-name'),
-                        profileNicknameInput: shadowRoot?.getElementById('sc-profile-nickname'),
-                        profileEmailInput: shadowRoot?.getElementById('sc-profile-email'),
-                        profilePhoneInput: shadowRoot?.getElementById('sc-profile-phone'),
-                        profileNotesInput: shadowRoot?.getElementById('sc-profile-notes')
+                        profileNameInput: shadowRoot?.getElementById('sc-profile-name')
                     };
                     userProfile = applyProfileFormValues({
-                        profileNameInput: initialProfileInputs.profileNameInput,
-                        profileNicknameInput: initialProfileInputs.profileNicknameInput,
-                        profileEmailInput: initialProfileInputs.profileEmailInput,
-                        profilePhoneInput: initialProfileInputs.profilePhoneInput,
-                        profileNotesInput: initialProfileInputs.profileNotesInput
+                        profileNameInput: initialProfileInputs.profileNameInput
                     }, {
-                        fullName: cachedProfileIdentity.fullName || '',
-                        nickname: '',
-                        email: cachedProfileIdentity.email || '',
-                        phone: '',
-                        notes: ''
+                        fullName: cachedProfileIdentity.fullName || ''
                     });
                 }
 
-                await refreshKeepAcrossTabsState({ hideInlineUiOnActive: false });
+                await refreshKeepAcrossTabsState();
 
                 const persistedConversation = IS_SIDEPANEL_SURFACE && keepAcrossTabsState.active
                     ? getPersistedConversationSnapshot(result)
@@ -4030,14 +5273,12 @@
                 syncAuthUi();
                 syncQuickPromptsVisibility();
                 refreshProfileNudgeVisibility();
-                syncKeepAcrossTabsUi();
             })().catch((error) => {
                 console.warn('[Init] ScreenChat bootstrap failed:', error);
                 resetConversationState();
                 syncAuthUi();
                 syncQuickPromptsVisibility();
                 refreshProfileNudgeVisibility();
-                syncKeepAcrossTabsUi();
             });
         });
     }
@@ -4048,9 +5289,6 @@
         container.className = 'sc-shell';
         container.dataset.scSurface = APP_SURFACE;
         const logoUrl = chrome.runtime.getURL('icons/icon48.png');
-        const sidebarOpenStyleIllustrationUrl = chrome.runtime.getURL('icons/svgs/open-style-sidebar.svg');
-        const windowOpenStyleIllustrationUrl = chrome.runtime.getURL('icons/svgs/open-style-window.svg');
-        const keepAcrossTabsIconUrl = getUiSvgUrl('pin.svg');
         const historyIconUrl = getUiSvgUrl('clock.svg');
         const chatIconUrl = getUiSvgUrl('comment-dots.svg');
         const profileIconUrl = getUiSvgUrl('user.svg');
@@ -4076,18 +5314,11 @@
                         <button class="sc-btn-icon sc-header-back" id="sc-header-back" title="Back" aria-label="Back to chat">
                             <img src="${backIconUrl}" class="sc-icon-img sc-icon-img-back" alt="" aria-hidden="true">
                         </button>
-                        <div class="sc-header-left">
-                            <img src="${logoUrl}" class="sc-logo" alt="ScreenChat">
-                            <div class="sc-brand-copy">
-                                <span class="sc-title">ScreenChat</span>
-                                <span class="sc-subtitle">Context for what is on screen</span>
-                            </div>
-                        </div>
+                        <button class="sc-header-support" id="sc-buy-coffee-btn" type="button" title="Buy me a coffee" aria-label="Buy me a coffee">
+                            <img src="${BUY_ME_A_COFFEE_BUTTON_IMAGE_URL}" class="sc-header-support-img" alt="" aria-hidden="true">
+                        </button>
                         <div class="sc-header-actions">
                             <div class="sc-header-actions-extra">
-                                <button class="sc-btn-icon" id="sc-keep-across-tabs" title="Keep across tabs" aria-label="Keep across tabs" aria-pressed="false">
-                                    <img src="${keepAcrossTabsIconUrl}" class="sc-icon-img" alt="" aria-hidden="true">
-                                </button>
                                 <button class="sc-btn-icon" id="sc-history-btn" title="History" aria-label="History">
                                     <img src="${historyIconUrl}" class="sc-icon-img" alt="" aria-hidden="true">
                                 </button>
@@ -4119,6 +5350,33 @@
                 </div>
 
                 <div class="sc-pane sc-pane-chat visible" id="sc-chat-pane">
+                    <div class="sc-chat-toolbar" id="sc-chat-toolbar">
+                        <div class="sc-model-picker" id="sc-chat-model-picker">
+                            <button class="sc-model-picker-trigger" id="sc-chat-model-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="sc-chat-model-menu">
+                                <span class="sc-model-picker-value">${getModelOptionsForProvider(selectedAiProvider).find((option) => option.id === getSelectedModelForProvider(selectedAiProvider))?.label || getSelectedModelForProvider(selectedAiProvider)}</span>
+                            </button>
+                            <div class="sc-model-picker-menu" id="sc-chat-model-menu" role="listbox" aria-label="Select AI model" hidden>
+                                ${renderChatModelMenuOptions()}
+                            </div>
+                        </div>
+                    </div>
+                    <section class="sc-profile-settings-group sc-chat-credential-card" id="sc-inline-api-key-card" hidden aria-labelledby="sc-inline-api-key-title">
+                        <div class="sc-profile-settings-copy">
+                            <p class="sc-profile-settings-label" id="sc-inline-api-key-title">Enter your OpenAI API key here</p>
+                        </div>
+                        <div class="sc-profile-field">
+                            <label>Provider</label>
+                            <div class="sc-provider-pill-list sc-provider-pill-rail" id="sc-inline-provider-pill-list" role="group" aria-label="Select AI provider">
+                                ${renderAiProviderPills('sc-inline-provider')}
+                            </div>
+                        </div>
+                        <div class="sc-profile-field">
+                    <label for="sc-inline-api-key-input">API Key</label>
+                    <input type="password" id="sc-inline-api-key-input" placeholder="sk-..." autocomplete="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore="true">
+                        </div>
+                        <button class="sc-profile-save sc-inline-api-key-save" id="sc-inline-api-key-save" type="button">Save key</button>
+                        <p class="sc-inline-api-key-chip" id="sc-inline-api-key-help">Saved only in this browser. ScreenChat sends it directly to OpenAI and does not save it on our servers.</p>
+                    </section>
                     <div class="sc-messages" id="sc-messages"></div>
                     <div class="sc-quick-prompts" id="sc-quick-prompts">
                         <button class="sc-prompt-btn" type="button" data-prompt="What are the key takeaways from this page?">
@@ -4168,7 +5426,7 @@
                         </button>
                     </div>
                     <div class="sc-hotkey-hint" id="sc-hotkey-hint"></div>
-                    <div class="sc-input-area">
+                    <div class="sc-input-area" id="sc-chat-input-area">
                         <div class="sc-input-row">
                             <div class="sc-input-wrapper">
                                 <textarea class="sc-textarea" id="sc-chat-input" placeholder="Ask me anything..." rows="1"></textarea>
@@ -4225,50 +5483,33 @@
                             </div>
                             <div class="sc-account-meta">
                                 <p class="sc-account-name" id="sc-account-name"></p>
-                                <p class="sc-account-email" id="sc-account-email"></p>
                             </div>
                         </div>
-                        <p class="sc-profile-desc">Your full name and email are imported from your Google account and saved to your ScreenChat profile. You can edit them here for how ScreenChat uses your information in responses. This does not change your main Google account information.</p>
+                        <p class="sc-profile-desc">Your name is imported from your Google account and saved to your ScreenChat profile. You can edit it here for how ScreenChat addresses you in responses. This does not change your main Google account information.</p>
                         <div class="sc-profile-field">
                             <label for="sc-profile-name">Full Name</label>
                             <input type="text" id="sc-profile-name" placeholder="John Doe">
                         </div>
-                        <div class="sc-profile-field">
-                            <label for="sc-profile-nickname">Nickname</label>
-                            <input type="text" id="sc-profile-nickname" placeholder="Nickname">
-                        </div>
-                        <div class="sc-profile-field">
-                            <label for="sc-profile-email">Email</label>
-                            <input type="email" id="sc-profile-email" placeholder="Email">
-                        </div>
-                        <div class="sc-profile-field">
-                            <label for="sc-profile-phone">Phone</label>
-                            <input type="tel" id="sc-profile-phone" placeholder="Phone">
-                        </div>
-                        <div class="sc-profile-field">
-                            <label for="sc-profile-notes">Notes</label>
-                            <textarea id="sc-profile-notes" placeholder="I work at google, prefer formal responses"></textarea>
-                        </div>
-                        <section class="sc-profile-settings-group" aria-labelledby="sc-default-open-style-label">
-                            <div class="sc-profile-settings-copy">
-                                <p class="sc-profile-settings-label" id="sc-default-open-style-label">Default Opening Style</p>
-                            </div>
-                            <div class="sc-open-style-grid" role="radiogroup" aria-labelledby="sc-default-open-style-label">
-                                <label class="sc-open-style-option ${preferredOpenStyle === 'window' ? 'selected' : ''}">
-                                    <input class="sc-open-style-input" type="radio" name="sc-default-open-style" value="window"${preferredOpenStyle === 'window' ? ' checked' : ''}>
-                                    <img src="${windowOpenStyleIllustrationUrl}" class="sc-open-style-illustration" alt="" aria-hidden="true">
-                                    <span class="sc-open-style-name">Chat Window</span>
-                                </label>
-                                <label class="sc-open-style-option ${preferredOpenStyle === 'sidebar' ? 'selected' : ''}">
-                                    <input class="sc-open-style-input" type="radio" name="sc-default-open-style" value="sidebar"${preferredOpenStyle === 'sidebar' ? ' checked' : ''}>
-                                    <img src="${sidebarOpenStyleIllustrationUrl}" class="sc-open-style-illustration" alt="" aria-hidden="true">
-                                    <span class="sc-open-style-name">Sidebar</span>
-                                </label>
-                            </div>
-                        </section>
+                            <section class="sc-profile-settings-group" aria-labelledby="sc-profile-provider-key-label">
+                                <div class="sc-profile-settings-copy">
+                                    <p class="sc-profile-settings-label" id="sc-profile-provider-key-label">OpenAI API Key</p>
+                                </div>
+                                <div class="sc-provider-pill-list sc-provider-pill-rail" id="sc-profile-provider-pill-list" role="group" aria-label="Select AI provider">
+                                    ${renderAiProviderPills('sc-profile-provider')}
+                                </div>
+                                <div class="sc-profile-field">
+                                    <label for="sc-profile-provider-key">API Key</label>
+                                    <input type="password" id="sc-profile-provider-key" placeholder="sk-..." autocomplete="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore="true">
+                                </div>
+                                <p class="sc-profile-settings-help sc-provider-key-chip" id="sc-profile-provider-key-help">Saved only in this browser. ScreenChat sends it directly to OpenAI and does not save it on our servers.</p>
+                            </section>
                         <div class="sc-profile-shortcut-row">
-                            <span class="sc-profile-shortcut-label">Shortcut</span>
-                            <a class="sc-profile-shortcut-link" id="sc-profile-shortcut-link" href="chrome://extensions/shortcuts" target="_blank" rel="noreferrer">Open settings</a>
+                            <div class="sc-profile-shortcut-copy">
+                                <span class="sc-profile-shortcut-label">Side Panel Shortcut</span>
+                                <span class="sc-profile-shortcut-value" id="sc-profile-shortcut-value">${escapeHtml(getDefaultShortcutText())}</span>
+                                <span class="sc-profile-shortcut-meta" id="sc-profile-shortcut-meta">Open shortcut settings to change it.</span>
+                            </div>
+                            <a class="sc-profile-shortcut-link" id="sc-profile-shortcut-link" href="chrome://extensions/shortcuts" target="_blank" rel="noreferrer">Change</a>
                         </div>
                         <button class="sc-profile-save" id="sc-profile-save" type="button">Save</button>
                         <div class="sc-profile-footer">
@@ -4326,7 +5567,6 @@
         setActivePane(isAuthenticated() ? 'chat' : 'auth', false);
         setupEventListeners();
         syncAuthUi();
-        syncKeepAcrossTabsUi();
     }
 
     function setupEventListeners() {
@@ -4334,12 +5574,12 @@
         const panel = shadowRoot.getElementById('sc-panel');
         const closeBtn = shadowRoot.getElementById('sc-close');
         const headerBackBtn = shadowRoot.getElementById('sc-header-back');
+        const buyCoffeeBtn = shadowRoot.getElementById('sc-buy-coffee-btn');
         const newChatBtn = shadowRoot.getElementById('sc-new-chat');
         const chatPaneBtn = shadowRoot.getElementById('sc-pane-chat');
         const historyPaneBtn = shadowRoot.getElementById('sc-pane-history');
         const profilePaneBtn = shadowRoot.getElementById('sc-pane-profile');
 
-        const keepAcrossTabsBtn = shadowRoot.getElementById('sc-keep-across-tabs');
         const historyBtn = shadowRoot.getElementById('sc-history-btn');
         const profileBtn = shadowRoot.getElementById('sc-profile-btn');
 
@@ -4362,11 +5602,13 @@
         const profileShortcutLink = shadowRoot.getElementById('sc-profile-shortcut-link');
         const profileSignOutBtn = shadowRoot.getElementById('sc-profile-signout');
         const profileNameInput = shadowRoot.getElementById('sc-profile-name');
-        const profileNicknameInput = shadowRoot.getElementById('sc-profile-nickname');
-        const profileEmailInput = shadowRoot.getElementById('sc-profile-email');
-        const profilePhoneInput = shadowRoot.getElementById('sc-profile-phone');
-        const profileNotesInput = shadowRoot.getElementById('sc-profile-notes');
-        const defaultOpenStyleInputs = Array.from(shadowRoot.querySelectorAll('input[name="sc-default-open-style"]'));
+        const profileProviderKeyInput = shadowRoot.getElementById('sc-profile-provider-key');
+        const profileProviderPillList = shadowRoot.getElementById('sc-profile-provider-pill-list');
+        const chatModelTrigger = shadowRoot.getElementById('sc-chat-model-trigger');
+        const chatModelMenu = shadowRoot.getElementById('sc-chat-model-menu');
+        const inlineProviderPillList = shadowRoot.getElementById('sc-inline-provider-pill-list');
+        const inlineApiKeyInput = shadowRoot.getElementById('sc-inline-api-key-input');
+        const inlineApiKeySaveBtn = shadowRoot.getElementById('sc-inline-api-key-save');
         const profileNudgeSkipBtn = shadowRoot.getElementById('sc-profile-nudge-skip');
         const profileNudgeStopBtn = shadowRoot.getElementById('sc-profile-nudge-stop');
 
@@ -4383,14 +5625,17 @@
         let historyClearingAll = false;
         let historyOpenMenuSessionId = '';
         setupPanelPointerInteractions();
+        enableHorizontalDragScroll(profileProviderPillList);
+        enableHorizontalDragScroll(inlineProviderPillList);
         [
             closeBtn,
             headerBackBtn,
+            buyCoffeeBtn,
             newChatBtn,
             chatPaneBtn,
             historyPaneBtn,
             profilePaneBtn,
-            keepAcrossTabsBtn,
+            chatModelTrigger,
             historyBtn,
             profileBtn,
             historyCloseBtn,
@@ -4399,15 +5644,10 @@
             attachScreenToggle,
             googleSignInBtn,
             profileSaveBtn,
+            inlineApiKeySaveBtn,
             profileShortcutLink,
             profileSignOutBtn
         ].forEach(bindPressScale);
-
-        if (keepAcrossTabsBtn) {
-            keepAcrossTabsBtn.addEventListener('click', () => {
-                toggleKeepAcrossTabs();
-            });
-        }
 
         if (profileShortcutLink instanceof HTMLAnchorElement) {
             const shortcutSettings = getShortcutSettingsInfo();
@@ -4424,13 +5664,138 @@
             });
         }
 
-        defaultOpenStyleInputs.forEach((input) => {
-            input.addEventListener('change', () => {
-                if (!input.checked) return;
-                setPreferredOpenStyle(input.value);
-            });
+        window.addEventListener('focus', () => {
+            if (uiState.activePane === 'profile') {
+                refreshShortcutInfo();
+            }
         });
-        syncPreferredOpenStyleUi();
+
+        if (buyCoffeeBtn instanceof HTMLButtonElement) {
+            buyCoffeeBtn.addEventListener('click', () => {
+                window.open(BUY_ME_A_COFFEE_URL, '_blank', 'noopener,noreferrer');
+            });
+        }
+
+        const setProfileProvider = (provider) => {
+            selectedProfileProvider = normalizeAiProvider(provider);
+            syncProfileApiKeySettingsUi();
+        };
+
+        if (profileProviderPillList instanceof HTMLElement) {
+            profileProviderPillList.addEventListener('click', (event) => {
+                const trigger = event.target instanceof Element
+                    ? event.target.closest('.sc-provider-pill[data-provider-id]')
+                    : null;
+                const providerId = trigger?.getAttribute('data-provider-id') || '';
+                if (!providerId) return;
+                setProfileProvider(providerId);
+            });
+        }
+
+        if (inlineProviderPillList instanceof HTMLElement) {
+            syncAiProviderSelectUi();
+            inlineProviderPillList.addEventListener('click', (event) => {
+                const trigger = event.target instanceof Element
+                    ? event.target.closest('.sc-provider-pill[data-provider-id]')
+                    : null;
+                const providerId = trigger?.getAttribute('data-provider-id') || '';
+                if (!providerId) return;
+                persistLocalAiProvider(providerId);
+                syncAuthUi();
+            });
+        }
+
+        syncProfileApiKeySettingsUi();
+
+        const setChatModelMenuOpen = (open) => {
+            if (!(chatModelTrigger instanceof HTMLButtonElement) || !(chatModelMenu instanceof HTMLElement)) return;
+            const shouldOpen = !!open;
+            chatModelMenu.hidden = !shouldOpen;
+            chatModelTrigger.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+            chatModelTrigger.classList.toggle('is-open', shouldOpen);
+            chatModelMenu.classList.toggle('is-open', shouldOpen);
+        };
+
+        syncChatModelSelectUi();
+
+        if (chatModelTrigger instanceof HTMLButtonElement && chatModelMenu instanceof HTMLElement) {
+            chatModelTrigger.addEventListener('click', (event) => {
+                event.preventDefault();
+                setChatModelMenuOpen(chatModelMenu.hidden);
+            });
+
+            chatModelTrigger.addEventListener('keydown', (event) => {
+                if (event.key !== 'ArrowDown' && event.key !== 'Enter' && event.key !== ' ') return;
+                event.preventDefault();
+                setChatModelMenuOpen(true);
+                const firstOption = chatModelMenu.querySelector('.sc-model-option.selected, .sc-model-option');
+                if (firstOption instanceof HTMLButtonElement) {
+                    firstOption.focus();
+                }
+            });
+
+            chatModelMenu.addEventListener('click', (event) => {
+                const trigger = event.target instanceof Element
+                    ? event.target.closest('.sc-model-option[data-model-id]')
+                    : null;
+                const modelId = trigger?.getAttribute('data-model-id') || '';
+                if (!modelId) return;
+                persistLocalModelForProvider(selectedAiProvider, modelId);
+                syncChatModelSelectUi();
+                setChatModelMenuOpen(false);
+                chatModelTrigger.focus();
+            });
+
+            chatModelMenu.addEventListener('keydown', (event) => {
+                const options = Array.from(chatModelMenu.querySelectorAll('.sc-model-option'));
+                const currentIndex = options.findIndex((option) => option === event.target);
+                if (event.key === 'Escape') {
+                    event.preventDefault();
+                    setChatModelMenuOpen(false);
+                    chatModelTrigger.focus();
+                    return;
+                }
+                if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                    event.preventDefault();
+                    if (!options.length) return;
+                    const direction = event.key === 'ArrowDown' ? 1 : -1;
+                    const nextIndex = currentIndex >= 0
+                        ? (currentIndex + direction + options.length) % options.length
+                        : 0;
+                    options[nextIndex]?.focus();
+                }
+            });
+
+            document.addEventListener('click', (event) => {
+                if (chatModelMenu.hidden) return;
+                const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+                if (path.includes(chatModelTrigger) || path.includes(chatModelMenu)) return;
+                setChatModelMenuOpen(false);
+            });
+        }
+
+        const saveInlineApiKey = () => {
+            const provider = normalizeAiProvider(selectedAiProvider);
+            const inputValue = inlineApiKeyInput instanceof HTMLInputElement ? inlineApiKeyInput.value : '';
+            persistLocalApiKeyForProvider(provider, inputValue);
+            if (inlineApiKeyInput instanceof HTMLInputElement && normalizeApiKeyForProvider(provider, inputValue)) {
+                inlineApiKeyInput.value = '';
+            }
+            syncAuthUi();
+            syncQuickPromptsVisibility();
+        };
+
+        if (inlineApiKeySaveBtn instanceof HTMLButtonElement) {
+            inlineApiKeySaveBtn.addEventListener('click', saveInlineApiKey);
+        }
+
+        if (inlineApiKeyInput instanceof HTMLInputElement) {
+            inlineApiKeyInput.addEventListener('keydown', (event) => {
+                if (event.key !== 'Enter') return;
+                event.preventDefault();
+                saveInlineApiKey();
+            });
+        }
 
         function syncProfileState(profile) {
             const storedProfile = profile && typeof profile === 'object' && !Array.isArray(profile)
@@ -4438,11 +5803,7 @@
                 : null;
 
             userProfile = applyProfileFormValues({
-                profileNameInput,
-                profileNicknameInput,
-                profileEmailInput,
-                profilePhoneInput,
-                profileNotesInput
+                profileNameInput
             }, storedProfile);
 
             persistProfileIdentity(userProfile);
@@ -5128,12 +6489,16 @@
                 profileSaveBtn.textContent = 'Saving...';
 
                 const profile = {
-                    fullName: profileNameInput?.value || '',
-                    nickname: profileNicknameInput?.value || '',
-                    email: profileEmailInput?.value || '',
-                    phone: profilePhoneInput?.value || '',
-                    notes: profileNotesInput?.value || ''
+                    fullName: profileNameInput?.value || ''
                 };
+                const profileProvider = normalizeAiProvider(selectedProfileProvider || selectedAiProvider);
+                const profileProviderKeyValue = profileProviderKeyInput?.value || '';
+                if (normalizeApiKeyForProvider(profileProvider, profileProviderKeyValue)) {
+                    persistLocalApiKeyForProvider(profileProvider, profileProviderKeyValue);
+                    if (profileProviderKeyInput instanceof HTMLInputElement) {
+                        profileProviderKeyInput.value = '';
+                    }
+                }
 
                 try {
                     if (!isAuthenticated()) {
@@ -5215,10 +6580,6 @@
                     clearPersistedConversationState();
 
                     if (profileNameInput) profileNameInput.value = '';
-                    if (profileNicknameInput) profileNicknameInput.value = '';
-                    if (profileEmailInput) profileEmailInput.value = '';
-                    if (profilePhoneInput) profilePhoneInput.value = '';
-                    if (profileNotesInput) profileNotesInput.value = '';
 
                     setAuthStatus('Signed out.', false);
                     setProfileSignOutState('idle');
@@ -5658,11 +7019,6 @@
             activeResponseStopRequested = true;
             const abortController = currentAbortController;
             currentAbortController = null;
-            console.info('[Chat] Stop requested', {
-                source,
-                activeResponseRequestId,
-                hadAbortController: !!abortController
-            });
             if (abortController) {
                 try {
                     abortController.abort();
@@ -5815,12 +7171,15 @@
                 requestAbortController = new AbortController();
                 currentAbortController = requestAbortController;
                 assertResponseRequestCanContinue(requestId);
+                const activeProvider = normalizeAiProvider(selectedAiProvider);
 
                 const chatPayload = {
+                    provider: activeProvider,
                     messages: messagesWithPageContext,
                     sessionId,
                     sessionUrl,
                     activeTabUrl,
+                    model: normalizeModelForProvider(activeProvider, getSelectedModelForProvider(activeProvider)),
                     profile: userProfile,
                     image: attachedImage,
                     clientContext: buildClientContext(sessionUrl)
@@ -5868,6 +7227,17 @@
                     role: 'assistant',
                     content: responseText,
                     timestamp: assistantMessageTimestamp
+                });
+                void persistChatExchangeToBackend({
+                    messages: chatPayload.messages,
+                    reply: responseText,
+                    sessionId,
+                    sessionUrl,
+                    clientContext: chatPayload.clientContext,
+                    model: chatPayload.model,
+                    provider: chatPayload.provider
+                }).catch((historyError) => {
+                    console.warn('[History] Persist after AI reply failed:', historyError);
                 });
                 sessionUpdatedAt = assistantMessageTimestamp;
                 persistConversationState({ updatedAt: assistantMessageTimestamp });

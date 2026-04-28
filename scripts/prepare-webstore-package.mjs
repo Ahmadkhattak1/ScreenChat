@@ -19,7 +19,8 @@ const packageFiles = [
     'manifest.json',
     'background.js',
     'content.js',
-    'content.css'
+    'content.css',
+    'sidepanel.html'
 ];
 
 const packageDirectories = [
@@ -192,8 +193,10 @@ Generated: ${new Date().toISOString()}
 ## Permissions
 
 - activeTab: temporary access to the current tab after the user clicks the extension or uses the hotkey.
+- sidePanel: opens ScreenChat in the browser sidebar when the user chooses the sidebar experience.
 - scripting: inject the ScreenChat UI into the active tab on demand.
 - storage: store sign-in session state, UI preferences, and saved local extension state.
+- host permissions (<all_urls>): allows ScreenChat to read page context and capture optional screenshots on whatever site the user explicitly uses it on.
 
 ## Privacy Answers
 
@@ -218,6 +221,7 @@ function main() {
     assertExists('icons/icon48.png');
     assertExists('icons/icon128.png');
     assertExists('icons/icon512.png');
+    assertExists('sidepanel.html');
 
     const manifest = readJson(manifestPath);
     const runtimeConfig = readJson(runtimeConfigPath);

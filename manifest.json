@@ -2,13 +2,12 @@
     "manifest_version": 3,
     "name": "ScreenChat - AI Chat for Your Browser",
     "short_name": "ScreenChat",
-    "version": "1.0.5",
+    "version": "1.0.6",
     "description": "Chat with your screen. AI chat that sees your page and helps answer questions.",
     "permissions": [
         "activeTab",
         "sidePanel",
-        "storage",
-        "scripting"
+        "storage"
     ],
     "host_permissions": [
         "<all_urls>"
@@ -31,7 +30,7 @@
                 "default": "Ctrl+Shift+Y",
                 "mac": "Command+Shift+Y"
             },
-            "description": "Open or toggle ScreenChat on the current tab"
+            "description": "Open ScreenChat side panel"
         }
     },
     "icons": {
